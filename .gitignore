@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+
+# 模型權重與大型檔案
+*.pt
+*.pth
+*.onnx
+*.engine
+*.weights
+*.ckpt
+
+# 模擬 / 實驗產出
+*.mp4
+*.avi
+*.mov
+*.bag
+*.ulg
+*.tlog
+logs/
+runs/
+output/
+
+# 校正用圖片與資料集（需要時再個別用 git add -f 加入）
+calibration/images/
+datasets/
+data/
+
+# 環境變數與金鑰（LLM API key 絕對不要 commit）
+.env
+.env.*
+*.key
+secrets/
+
+# 編輯器 / 系統
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
