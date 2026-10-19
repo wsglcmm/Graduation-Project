@@ -1,0 +1,5 @@
+numpy>=1.24
+pyyaml>=6.0
+pydantic>=2.0
+pytest>=7.0
+# calibration/calibrate.py additionally needs: opencv-python
