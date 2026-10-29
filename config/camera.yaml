@@ -1,28 +1,32 @@
-# 相機設定（Phase 1 雛形用）
+# 相機設定
 #
-# ⚠️ 標註 ASSUMED 的欄位是「假設值」，尚未經 A 確認（規格 docs/interface_spec.md §6、§9）。
-#    收到 A 提供的 Gazebo SDF（<camera> 的 horizontal_fov、解析度、<pose>）後，請逐項更新並移除 ASSUMED。
-#    不要憑記憶填入 Gazebo 預設值：不同無人機模型的相機設定差異很大。
+# 數值來源：A 回覆的 Gazebo SDF（2026-10-19）。仍標 ASSUMED 的欄位尚未確認。
+#
+# SDF 原文：<horizontal_fov>1.74</horizontal_fov>、1280x960、30 Hz、無 distortion、
+#           <pose>0 0 .10 0 1.5707 0</pose>
+# 換算（Gazebo FLU → 本專案 FRD，見 coord_transform/frames.py 的 sdf_camera_pose_to_mount）：
+#   pitch 1.5707（FLU，繞左軸）→ pitch_deg -90（FRD，光軸朝正下方）
+#   位置 (0, 0, +0.10)（FLU，z 向上）→ offset_body_m (0, 0, -0.10)（FRD，z 向下）
 
 image:
-  width: 1280          # ASSUMED：規格 §6 暫定值
-  height: 720          # ASSUMED
+  width: 1280
+  height: 960
 
 intrinsics:
-  # source: hfov        → 由水平視角與解析度計算（模擬器、無畸變）
+  # source: hfov        → 由水平視角與解析度計算（模擬器、無畸變、正方形像素）
   # source: calibrated  → 使用下方 fx/fy/cx/cy/dist（例如 calibrate.py 的結果）
   source: hfov
-  hfov_deg: 90.0       # ASSUMED：待 A 提供 SDF 的 <horizontal_fov>
+  hfov_rad: 1.74       # SDF 原值（約 99.7°）→ fx = fy = 640 / tan(0.87) ≈ 539.9 px
   fx: null
   fy: null
   cx: null
   cy: null
-  dist: [0.0, 0.0, 0.0, 0.0, 0.0]   # k1, k2, p1, p2, k3；模擬器預設應為 0，需確認 SDF 未設 distortion
+  dist: [0.0, 0.0, 0.0, 0.0, 0.0]   # k1, k2, p1, p2, k3；SDF 未設 distortion
 
 mount:
-  pitch_deg: -90.0     # ASSUMED：-90 = 正下方（nadir），0 = 平視前方，負值向下
-  yaw_deg: 0.0         # ASSUMED：相對機體前方，右為正
-  offset_body_m: [0.0, 0.0, 0.0]    # ASSUMED：相機相對機體原點，機體 FRD，單位 m
+  pitch_deg: -90.0     # SDF pitch 1.5707 rad；-90 = 正下方（nadir）
+  yaw_deg: 0.0         # SDF yaw 0
+  offset_body_m: [0.0, 0.0, -0.10]  # ASSUMED：SDF 的 0.10 m 是相對哪個 link 尚未確認，A 估計誤差 10-20 cm
 
 ground:
   plane_d_m: 0.0       # 規格 §2.4：地面平面 NED 的 down = 0

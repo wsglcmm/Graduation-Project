@@ -1,0 +1,12 @@
+# 誤差模型（Phase 2）：各輸入誤差的 1σ，用來計算 TargetWorld 的 uncertainty_m
+#
+# ⚠️ 全部都是 ASSUMED（假設值），用途是先讓誤差分析跑得起來。
+#    Phase 3 請改用實測值標定：
+#      python -m analysis.calibrate_error_model <session 資料夾>
+#    它會比較 Gazebo 真值與 A、B 的輸出，算出各項的偏差與標準差（紀錄格式見 analysis/log_format.md）
+
+pixel_sigma_px: 2.0         # ASSUMED：bbox 底邊中點的抖動
+roll_pitch_sigma_deg: 0.5   # ASSUMED：roll、pitch 各自的誤差
+yaw_sigma_deg: 2.0          # ASSUMED：航向通常比 roll/pitch 差（磁力計受干擾）
+altitude_sigma_m: 0.5       # ASSUMED：高度誤差（氣壓計 / EKF）
+horizontal_position_sigma_m: 0.0  # 無人機自身 n、e 位置誤差（各軸 1σ）。0 = 尚未計入，待 analysis.calibrate_error_model 標定

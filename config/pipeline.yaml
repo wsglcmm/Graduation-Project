@@ -1,0 +1,20 @@
+# 即時流程設定（coord_transform/pipeline.py 的 TargetWorldPipeline.from_config 讀取）
+
+# bbox 參考點：bottom_center（規格 §2.4 現行）/ center / center_half_height
+# 誤差研究建議 nadir 相機改用 center_half_height（見 analysis/README.md 實驗 5），
+# 但這是規格記載的行為，改之前先更新規格並開 PR。
+reference_point: bottom_center
+
+# 影像時間戳要加多少 ms 才等於姿態時鐘的同一時刻。
+# ASSUMED 0：A 回報「同一刻差 24 ms」，待確認是固定偏移還是取樣錯開；
+# 可用 python -m analysis.replay <session> --estimate-time-offset 從模擬紀錄估計。
+frame_time_offset_ms: 0.0
+
+# 偵測幀等姿態的佇列上限（30 Hz 下 10 幀約 330 ms）；超過就以 no_pose 輸出最舊的
+max_pending_frames: 10
+
+# 姿態 20 Hz（每 50 ms）：相鄰兩筆超過這個間隔就不插值（容許連續掉 2 筆）
+pose_max_gap_ms: 150
+
+# 姿態緩衝保留多久（規格 §2.3：至少 2 秒）
+pose_horizon_ms: 2000
