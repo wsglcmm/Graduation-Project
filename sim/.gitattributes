@@ -1,0 +1,2 @@
+# sim/ 的檔案會上傳到 Linux 伺服器執行：一律用 LF，避免 .sh 出現 $'\r' 錯誤
+* text=auto eol=lf
