@@ -49,19 +49,19 @@ tests/           單元測試
 - 說明用繁體中文，專有名詞保留英文（YOLO、MAVLink、NED 等）
 - 提供程式碼前先用 2–3 句說明邏輯與設計理由，不要冗長鋪陳
 
-## Git 規範（教學模式）
+## Git 規範（由 Claude 直接操作）
 
-我這學期在練習 Git，**請不要自己執行會改動版本歷史的 git 指令**。
-
-- 禁止代為執行：`git add`、`git commit`、`git push`、`git merge`、`git rebase`、`git reset`、`git checkout -b`
-- 可以執行：`git status`、`git diff`、`git log`（唯讀查詢）
-- 完成程式或文件變更後，請列出建議的指令順序（`git status` → `git add` → `git commit` → `git push`），並說明每個指令的作用，由我自己執行
+git 流程由你直接完成（開分支、commit、push、開 PR），不需要我手動操作。完成後簡短回報：分支名稱、commit 清單（hash + 訊息）、測試結果，以及需要我知道或決定的事。
 
 規則：
-- **分支**：我的工作在 `feature/coordinate-transform`、`feature/llm-agent` 等分支，不直接改 `main`。文件類變更用 `docs/...` 分支
+- **分支**：我的工作在 `feature/coordinate-transform`、`feature/llm-agent`、`feature/multi-drone-fusion`、`feature/demo-dashboard` 等分支，不直接改 `main`。文件類變更用 `docs/...` 分支
 - **Commit 訊息**：Conventional Commits，例如 `feat(coord): 新增相機內參校正模組`、`fix(agent): 修正任務規劃 prompt 的邊界條件`、`docs: 更新模組介面規格文件`；每個 commit 只做一件事
-- **`shared/` 與 `docs/interface_spec.md`**：修改會影響 A、B，提醒我開 Pull Request，不要直接 push 到 `main`
-- **push 前提醒我檢查**：(a) 有無大型檔案或暫存檔（模擬影片、模型權重 `.pt`、校正用圖片請放 `.gitignore`），(b) commit 訊息是否清楚，(c) 是否該開 PR 讓 A、B 看過
+- **push 前**：測試必須全部通過（`python -m pytest -q`），並自行檢查 (a) 沒有大型檔案或暫存檔（模擬影片、模型權重 `.pt`、校正圖片、模擬紀錄放 `.gitignore`），(b) commit 訊息清楚，(c) 是否需要開 PR 讓 A、B 看過
+- **`shared/` 與 `docs/interface_spec.md`**：修改會影響 A、B，一律開 Pull Request，不直接 push 到 `main`
+- **先問我才能做**：合併任何 PR 到 `main`、force push、改寫已推上去的歷史、刪除遠端分支、修改 A 或 B 負責的程式
+- **絕對不 commit**：`.env`、API 金鑰、模型權重、資料集與模擬紀錄檔
+- **同步**：在我電腦上工作時（例如 VS Code 裡的 Claude Code），開始前先 `git pull`，避免和雲端推上去的 commit 衝突
+- **權限**：push 被拒絕時直接告訴我，不要改用其他方式繞過
 
 ## 安全
 
