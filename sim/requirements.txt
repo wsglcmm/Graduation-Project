@@ -1,0 +1,1 @@
+mavsdk-grpc==4.0.5

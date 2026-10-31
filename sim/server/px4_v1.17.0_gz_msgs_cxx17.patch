@@ -1,0 +1,13 @@
+diff --git a/src/modules/simulation/gz_msgs/CMakeLists.txt b/src/modules/simulation/gz_msgs/CMakeLists.txt
+index 2501811e5e..96e4e9e7de 100644
+--- a/src/modules/simulation/gz_msgs/CMakeLists.txt
++++ b/src/modules/simulation/gz_msgs/CMakeLists.txt
+@@ -24,6 +24,8 @@ if (Protobuf_FOUND)
+             ${Protobuf_INCLUDE_DIRS}
+     )
+     target_link_libraries(px4_gz_msgs PUBLIC ${PROTOBUF_LIBRARIES})
++    target_compile_features(px4_gz_msgs PUBLIC cxx_std_17)
++    target_compile_options(px4_gz_msgs PUBLIC -Wno-error=deprecated-declarations)
+     if (Protobuf_VERSION VERSION_LESS "3.8")
+         target_compile_options(px4_gz_msgs PRIVATE -Wno-error=float-equal)
+     endif()
