@@ -6,14 +6,14 @@
 reference_point: bottom_center
 
 # 影像時間戳要加多少 ms 才等於姿態時鐘的同一時刻。
-# ASSUMED 0：A 回報「同一刻差 24 ms」，待確認是固定偏移還是取樣錯開；
-# 可用 python -m analysis.replay <session> --estimate-time-offset 從模擬紀錄估計。
+# 0：規格 v0.1.2 §2.3 確認「差 24 ms」是舊 20 Hz 姿態的取樣錯開，不是固定偏移；
+# 依影像時間戳在姿態序列上內插即可。之後可用 python -m analysis.replay <session> --estimate-time-offset 複查。
 frame_time_offset_ms: 0.0
 
 # 偵測幀等姿態的佇列上限（30 Hz 下 10 幀約 330 ms）；超過就以 no_pose 輸出最舊的
 max_pending_frames: 10
 
-# 姿態 20 Hz（每 50 ms）：相鄰兩筆超過這個間隔就不插值（容許連續掉 2 筆）
+# 姿態改用 odometry 後約 100 Hz（間隔 8–12 ms）；規格 §2.3 規定相鄰兩筆超過 150 ms 就不插值
 pose_max_gap_ms: 150
 
 # 姿態緩衝保留多久（規格 §2.3：至少 2 秒）

@@ -1,6 +1,7 @@
 # 相機設定
 #
-# 數值來源：A 回覆的 Gazebo SDF（2026-10-19）。仍標 ASSUMED 的欄位尚未確認。
+# 數值來源：A 回覆的 Gazebo SDF（2026-10-19），相機位置依規格 v0.1.2 §6（A 於 2026-10-31 實測）。
+# 仍標 ASSUMED 的欄位尚未確認。
 #
 # SDF 原文：<horizontal_fov>1.74</horizontal_fov>、1280x960、30 Hz、無 distortion、
 #           <pose>0 0 .10 0 1.5707 0</pose>
@@ -26,8 +27,10 @@ intrinsics:
 mount:
   pitch_deg: -90.0     # SDF pitch 1.5707 rad；-90 = 正下方（nadir）
   yaw_deg: 0.0         # SDF yaw 0
-  offset_body_m: [0.0, 0.0, -0.10]  # ASSUMED：SDF 的 0.10 m 是相對哪個 link 尚未確認，A 估計誤差 10-20 cm
+  # 參考點 = Gazebo 模型原點（規格 §6 建議）：camera_link 在模型原點上方 0.10 m、水平 0。
+  # 必須和地面平面用同一個參考點（見 ground.plane_d_m）；改用 base_link 的話兩者要一起改成 (0, 0, +0.14) 與 +0.227。
+  offset_body_m: [0.0, 0.0, -0.10]
 
 ground:
-  plane_d_m: 0.0       # 規格 §2.4：地面平面 NED 的 down = 0
+  plane_d_m: 0.0       # 模型原點約定下 = ned_origin_enu_m.z − ground_z_enu_m ≈ −0.013 m，取 0（規格 §6）
   max_range_m: 1000.0  # ASSUMED：超過此距離回報 out_of_range

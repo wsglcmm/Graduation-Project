@@ -3,7 +3,7 @@
 為什麼需要：影像約 30 Hz、姿態約 50 Hz，兩者時間戳不會剛好對上；而且 B 的偵測結果
 要等推論完成才送到，此時「最新一筆姿態」已經是之後的姿態了。用錯時刻的姿態，
 誤差約為 高度 × 角速度 × 時間差（30 m、30°/s、50 ms → 約 0.8 m）。
-A 實測姿態約 20 Hz，時間戳精度 1 ms（att_timestamp_us），見 analysis/README.md。
+A 的 flight_api 改用 MAVSDK odometry 後約 100 Hz，位置與姿態共用 time_usec（sim time），見規格 §2.3。
 
 規則：
     - 位置：線性插值；姿態：四元數 slerp；雲台角（若有）：線性插值。
@@ -20,7 +20,7 @@ from . import rotations
 from .messages import PoseMessage
 from .pixel_to_ned import Pose
 
-DEFAULT_MAX_GAP_NS = 150_000_000  # A 實測姿態 20 Hz（間隔 50 ms）：容許連續掉 2 筆，再多就不插值
+DEFAULT_MAX_GAP_NS = 150_000_000  # 規格 §2.3：相鄰兩筆超過 150 ms 就不插值（原本為 20 Hz 姿態設計，100 Hz 下仍適用）
 DEFAULT_HORIZON_NS = 2_000_000_000  # 規格 §2.3：至少保留最近 2 秒
 
 
