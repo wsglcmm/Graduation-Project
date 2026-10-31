@@ -5,11 +5,13 @@
     t = truth.truth_at(cam.last_stamp)                    # {名稱: {"n","e","d","roll_deg","pitch_deg","yaw_deg"}}
     r = truth.relative_body(cam.last_stamp, "car_blue")   # 目標相對無人機：前/右/下（m，只轉 yaw）
     uv = truth.project(cam.last_stamp, "car_blue")        # 目標地面點在畫面上的真實像素 (u, v, 深度)
+    raw = truth.raw_since("car_blue", last_ns)            # Gazebo 原始 ENU 串流（錄製用）
 
 座標：Gazebo 是 ENU（x 東、y 北、z 上）、機體 FLU；這裡一律轉成 NED 與機體 FRD：
 n = y、e = x、d = -z；姿態轉成 NED 下的 roll/pitch/yaw（度，yaw 0 = 北、90 = 東）。
 原點是 Gazebo 世界原點，與 PX4 EKF 的本地原點可能差幾公分；評估座標轉換請用
 relative_ned / relative_body / project（都是目標相對無人機），不受原點差異影響。
+raw_since 另外保留 Gazebo 原始的 ENU 位置與四元數（不轉換），給規格的 truth.jsonl 用。
 """
 import atexit
 import bisect
@@ -76,6 +78,7 @@ class SimTruth:
 
     def _on_pose(self, msg):
         stamp = msg.header.stamp.sec + msg.header.stamp.nsec * 1e-9
+        stamp_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nsec
         self.msg_count += 1
         for p in msg.pose:
             h = self._hist.get(p.name)
@@ -83,7 +86,9 @@ class SimTruth:
                 continue
             o = p.orientation
             roll, pitch, yaw = _rpy_deg(_enu_flu_to_ned_frd(_quat_to_R(o.w, o.x, o.y, o.z)))
-            rec = (stamp, p.position.y, p.position.x, -p.position.z, roll, pitch, yaw)
+            # 前 7 個欄位給 _at 內插（NED、度）；後面是原始值：stamp_ns、ENU 位置、四元數 wxyz
+            rec = (stamp, p.position.y, p.position.x, -p.position.z, roll, pitch, yaw,
+                   stamp_ns, p.position.x, p.position.y, p.position.z, o.w, o.x, o.y, o.z)
             with self._lock:
                 if not h or stamp > h[-1][0]:
                     h.append(rec)
@@ -110,6 +115,12 @@ class SimTruth:
         out["yaw_deg"] = _wrap(a[6] + w * _wrap(b[6] - a[6]))
         out["stamp_used"] = stamp
         return out
+
+    def raw_since(self, name, stamp_ns):
+        """回傳 stamp_ns 之後（不含）的原始紀錄：[(stamp_ns, (x, y, z), (w, x, y, z)), ...]，Gazebo ENU / FLU。"""
+        with self._lock:
+            h = list(self._hist.get(name, ()))
+        return [(r[7], r[8:11], r[11:15]) for r in h if r[7] > stamp_ns]
 
     def latest_stamp(self):
         with self._lock:

@@ -4,6 +4,7 @@
     cam = SimCamera()
     ok, frame = cam.read()      # frame: BGR numpy (H, W, 3)
     t = cam.last_stamp          # 這張影像的模擬時間（秒）
+    t_ns = cam.last_stamp_ns    # 同一個時間的整數奈秒（規格的 timestamp_ns）
     cam.release()
 
 影像方向（下視鏡頭）：畫面上方 = 機頭前方，畫面右方 = 機體右方。
@@ -35,10 +36,10 @@ class SimCamera:
         self.topic = topic or find_image_topic(timeout=timeout)
         self._cv = threading.Condition()
         self._frame = None
-        self._stamp = None
+        self._stamp = self._stamp_ns = None
         self._seq = 0          # 已收到的張數
         self._read_seq = 0     # 上次 read() 回傳到第幾張
-        self.last_stamp = None
+        self.last_stamp = self.last_stamp_ns = None
         self.width = self.height = None
         self._node = Node()
         if not self._node.subscribe(Image, self.topic, self._on_image):
@@ -58,8 +59,9 @@ class SimCamera:
             img = np.repeat(img, 3, axis=2)  # 灰階 -> 3 通道
         img = np.ascontiguousarray(img)
         stamp = msg.header.stamp.sec + msg.header.stamp.nsec * 1e-9
+        stamp_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nsec
         with self._cv:
-            self._frame, self._stamp = img, stamp
+            self._frame, self._stamp, self._stamp_ns = img, stamp, stamp_ns
             self.width, self.height = w, h
             self._seq += 1
             self._cv.notify_all()
@@ -70,7 +72,7 @@ class SimCamera:
             if not self._cv.wait_for(lambda: self._seq > self._read_seq, timeout):
                 return False, None
             self._read_seq = self._seq
-            self.last_stamp = self._stamp
+            self.last_stamp, self.last_stamp_ns = self._stamp, self._stamp_ns
             return True, self._frame
 
     def isOpened(self):

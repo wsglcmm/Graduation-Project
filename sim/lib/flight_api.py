@@ -16,6 +16,7 @@ set_velocity 需要持續呼叫（建議 10 Hz 以上）；超過 watchdog_s 秒
 time_usec（Gazebo 模擬時間）。經緯度與 rel_alt_m 取自 position（無時間戳）。
 時間對齊：鏡頭 stamp 與 ODOMETRY 時間戳是同一個時鐘（秒）。
     s = d.get_state_at(cam.last_stamp)   # 拍下那張畫面當下的狀態（內插）
+    new = d.history_since(last_usec)     # 原始 ODOMETRY 串流（錄製用），每筆有 time_usec
 """
 import asyncio
 import bisect
@@ -178,6 +179,7 @@ class Drone:
                 if stamp > 0 and (not self._hist or stamp > self._hist[-1]["stamp"]):
                     snap = {k: self._state.get(k) for k in HIST_KEYS}
                     snap["stamp"] = stamp
+                    snap["time_usec"] = o.time_usec   # 整數，換成奈秒不會有浮點誤差
                     self._hist.append(snap)
 
         watchers = [
@@ -367,6 +369,14 @@ class Drone:
             else:
                 out[k] = va + w * (vb - va)
         return out
+
+    def history_since(self, time_usec):
+        """回傳 time_usec 之後（不含）的原始 ODOMETRY 紀錄（dict 複本，欄位同 HIST_KEYS 加 stamp、time_usec）。
+
+        歷史只保留 history_s 秒，錄製時要定期呼叫（例如每張畫面一次）才不會漏。
+        """
+        with self._lock:
+            return [dict(h) for h in self._hist if h["time_usec"] > time_usec]
 
     async def _shutdown(self):
         await self._stop_offboard()
