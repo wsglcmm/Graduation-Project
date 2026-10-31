@@ -17,7 +17,9 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import convert_session as cs  # noqa: E402
+import session_format as sf  # noqa: E402
 
 POSE_KEYS = {"timestamp_ns", "position_ned_m", "attitude_rad", "quaternion_wxyz",
              "altitude_agl_m", "velocity_ned_mps", "gimbal_rad"}   # C 的 PoseMessage（extra="forbid"）
@@ -25,11 +27,11 @@ POSE_KEYS = {"timestamp_ns", "position_ned_m", "attitude_rad", "quaternion_wxyz"
 
 def enu_flu_to_ned_frd(roll, pitch, yaw):
     """C 的 gazebo_pose_to_ned 的封閉解，用來核對反方向。"""
-    return roll, -pitch, cs._wrap_pi(math.pi / 2 - yaw)
+    return roll, -pitch, sf.wrap_pi(math.pi / 2 - yaw)
 
 
 def angle_close(a, b, tol=1e-9):
-    return abs(cs._wrap_pi(a - b)) < tol
+    return abs(sf.wrap_pi(a - b)) < tol
 
 
 def write_csv(path, cols, rows):
@@ -95,22 +97,22 @@ class TestMath(unittest.TestCase):
         rng = random.Random(1)
         for _ in range(200):
             r, p, y = rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-math.pi, math.pi)
-            w, x, qy, z = cs.euler_to_quat(r, p, y)
+            w, x, qy, z = sf.euler_to_quat(r, p, y)
             self.assertAlmostEqual(w * w + x * x + qy * qy + z * z, 1.0, places=12)
             R = cs.rpy_matrix(r, p, y)
             self.assertAlmostEqual(R[0][1], 2 * (x * qy - w * z), places=12)
             self.assertAlmostEqual(R[2][0], 2 * (x * z - w * qy), places=12)
 
     def test_stamp_to_ns_is_exact(self):
-        self.assertEqual(cs.stamp_to_ns("132.2680"), 132_268_000_000)
-        self.assertEqual(cs.stamp_to_ns("0.0040"), 4_000_000)
-        self.assertEqual(cs.stamp_to_ns("324.516"), 324_516_000_000)
+        self.assertEqual(sf.seconds_str_to_ns("132.2680"), 132_268_000_000)
+        self.assertEqual(sf.seconds_str_to_ns("0.0040"), 4_000_000)
+        self.assertEqual(sf.seconds_str_to_ns("324.516"), 324_516_000_000)
 
     def test_target_class(self):
-        self.assertEqual(cs.target_class("car_red"), "car")
-        self.assertEqual(cs.target_class("person_2"), "person")
+        self.assertEqual(sf.target_class("car_red"), "car")
+        self.assertEqual(sf.target_class("person_2"), "person")
         with self.assertRaises(ValueError):
-            cs.target_class("tree_1")
+            sf.target_class("tree_1")
 
 
 class TestConvertSession(unittest.TestCase):
