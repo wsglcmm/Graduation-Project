@@ -95,16 +95,25 @@ def follow_cmd(d, tr, car, alt):
 
 
 # ---------- 起飛前後 ----------
-def measure_origin(d, tr, secs=1.0):
-    """起飛前讀無人機模型的 Gazebo pose（取最後 secs 秒平均）= PX4 local NED 原點（規格 ned_origin_enu_m）。"""
-    if d.get_state().get("in_air"):
+def measure_origin(d, tr, secs=1.0, max_offset_m=0.2):
+    """起飛前讀無人機模型的 Gazebo pose（取最後 secs 秒平均）= PX4 local NED 原點（規格 ned_origin_enu_m）。
+
+    PX4 的原點是開機時的位置、之後固定不變；上一次飛行降落在別處時，現在的位置就不是原點，
+    所以 EKF 顯示離原點超過 max_offset_m 就停下來，請使用者重開模擬。回傳 (原點, 當下的 EKF n/e/d)。
+    """
+    s = d.get_state()
+    if s.get("in_air"):
         raise RuntimeError("無人機已經在空中：請先降落或重開模擬，ned_origin_enu_m 要在地上量")
+    ekf = tuple(round(s.get(k) or 0.0, 4) for k in ("north_m", "east_m", "down_m"))
+    if math.hypot(ekf[0], ekf[1]) > max_offset_m:
+        raise RuntimeError(f"EKF 顯示無人機離 local NED 原點 {math.hypot(ekf[0], ekf[1]):.2f} m（上一次飛行降落在別處）。"
+                           "PX4 的原點是開機位置：請重開模擬（start_sim.sh）再錄製")
     time.sleep(secs)
     raw = tr.raw_since(DRONE, 0)
     if not raw:
         raise RuntimeError(f"收不到 {DRONE} 的 Gazebo 真值")
     pts = [p for t, p, _ in raw if t >= raw[-1][0] - secs * 1e9]
-    return tuple(round(sum(p[i] for p in pts) / len(pts), 4) for i in range(3))
+    return tuple(round(sum(p[i] for p in pts) / len(pts), 4) for i in range(3)), ekf
 
 
 def goto_alt(d, alt, tol=0.3, timeout=90.0):
@@ -155,8 +164,8 @@ class StreamRecorder:
 # ---------- 主程式 ----------
 def record(args, d, cam, tr):
     alt, plan, moving = make_plan(args)
-    origin = measure_origin(d, tr)
-    print(f"起飛點（Gazebo ENU）：{origin}", flush=True)
+    origin, ekf_at_origin = measure_origin(d, tr)
+    print(f"起飛點（Gazebo ENU）：{origin}；當下 EKF n/e/d：{ekf_at_origin}", flush=True)
     car = None
     if moving:
         car = MovingTarget(CAR, moving[0], moving[1], tr.latest_stamp)
@@ -263,6 +272,7 @@ def record(args, d, cam, tr):
             created=time.strftime("%Y-%m-%d %H:%M:%S"),
             scenario=args.scenario, altitude_m=alt,
             ned_origin_source="起飛前 1 秒的 Gazebo 模型 pose 平均（本次錄製實測）",
+            ekf_ned_at_origin_measure_m=ekf_at_origin,
             frames=n_saved, duration_s=round(dur, 1), save_every=SAVE_EVERY,
             counts={"poses": rec.poses.count, "truth": rec.truth.count},
             world="default_targets.sdf",
