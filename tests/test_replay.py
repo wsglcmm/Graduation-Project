@@ -184,3 +184,14 @@ def test_matching_requires_same_class(clean_session):
     assert replay.match_targets(clean_session, [fake], 0) == []
     fake["targets"][0]["class"] = "car"
     assert [m["truth_name"] for m in replay.match_targets(clean_session, [fake], 0)] == ["car_1"]
+
+
+# ---------- pose-only 與位置時間偏移（A 的 2026-11-01 資料沒有 detections.jsonl）----------
+def test_session_without_detections_is_pose_only(tmp_path):
+    d = generate(tmp_path / "s", CAM, dataclasses.replace(NOISELESS, duration_s=1.0))
+    (d / "detections.jsonl").unlink()
+    ses = load_session(d)
+    assert not ses.has_detections and ses.frames == [] and ses.poses
+    with pytest.raises(SystemExit, match="detections.jsonl"):
+        replay.main([str(d), "--no-plots", "--out", str(tmp_path / "out")])
+

@@ -15,7 +15,7 @@ session_2026-10-21_run1/
 ├── meta.json          ← A 寫：座標原點與目標清單
 ├── poses.jsonl        ← A 寫：無人機姿態（PX4 / MAVSDK 估計值）
 ├── truth.jsonl        ← A 寫：Gazebo 真值（無人機與目標）
-└── detections.jsonl   ← B 寫：偵測結果
+└── detections.jsonl   ← B 寫：偵測結果（選填：還沒有時只能做 pose-only 標定，重播需要它）
 ```
 
 `.jsonl` 是「一行一筆 JSON」：每收到一筆資料就 `json.dumps` 寫一行，不需要讀回整個檔案，程式中斷也不會壞掉。

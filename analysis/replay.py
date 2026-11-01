@@ -239,6 +239,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     session = load_session(args.session)
+    if not session.has_detections:
+        raise SystemExit(f"{session.path} 沒有 detections.jsonl：重播需要 B 的偵測結果。只有姿態時請用 python -m analysis.calibrate_error_model")
     cam = load_camera_config(args.camera)
     pipe_cfg = load_pipeline_config(args.pipeline)
     if args.reference:

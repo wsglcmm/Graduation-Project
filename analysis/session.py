@@ -12,7 +12,8 @@ from coord_transform.frames import ENU_TO_NED, gazebo_pose_to_ned
 from coord_transform.messages import CLASSES
 from coord_transform.pixel_to_ned import Pose
 
-FILES = ("meta.json", "poses.jsonl", "detections.jsonl", "truth.jsonl")
+FILES = ("meta.json", "poses.jsonl", "truth.jsonl")  # 必要檔案
+OPTIONAL_FILES = ("detections.jsonl",)  # B 還沒跑偵測時可以缺：只做姿態（pose-only）標定
 
 
 def read_jsonl(path) -> List[dict]:
@@ -71,8 +72,12 @@ class Session:
     path: Path
     meta: dict
     poses: List[dict]
-    frames: List[dict]
+    frames: List[dict]  # detections.jsonl；沒有時為空（pose-only）
     truth: Dict[str, TruthTrack] = field(default_factory=dict)
+
+    @property
+    def has_detections(self) -> bool:
+        return bool(self.frames)
 
     @property
     def origin_enu(self) -> np.ndarray:
@@ -145,7 +150,8 @@ def load_session(path) -> Session:
         raise ValueError(f"meta.json 列出的目標在 truth.jsonl 找不到：{missing_targets}")
 
     poses = sorted(read_jsonl(path / "poses.jsonl"), key=lambda m: m["timestamp_ns"])
-    frames = sorted(read_jsonl(path / "detections.jsonl"), key=lambda m: m["timestamp_ns"])
+    det = path / "detections.jsonl"
+    frames = sorted(read_jsonl(det), key=lambda m: m["timestamp_ns"]) if det.exists() else []
     return Session(path, meta, poses, frames, truth)
 
 
