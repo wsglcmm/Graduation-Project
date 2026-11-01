@@ -111,3 +111,40 @@ def test_target_lost_triggers_immediately():
     c.tick(0, DRONES, [target()])
     ev = c.tick(S, DRONES, [target(status="lost")])
     assert ev[0].trigger == "target_lost" and c.current.mode == "search"
+
+
+# ---------- Anthropic 客戶端（不連網：用 httpx2 的 MockTransport 攔截請求）----------
+def test_anthropic_client_request_and_text_extraction(monkeypatch):
+    anthropic = pytest.importorskip("anthropic")
+    httpx = pytest.importorskip("httpx2")  # anthropic 2.x 使用 httpx2
+    from llm_agent.llm_client import AnthropicClient
+
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+            "content": [{"type": "thinking", "thinking": "...", "signature": "x"}, {"type": "text", "text": '{"mode": "hold"}'}],
+            "stop_reason": "end_turn", "stop_sequence": None,
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        })
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    sdk = anthropic.Anthropic(api_key="test-key", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    client = AnthropicClient(sdk_client=sdk, effort="low")
+    out = client.complete("系統提示", [{"role": "user", "content": "嗨"}])
+    assert out == '{"mode": "hold"}'  # thinking block 被略過，只取 text
+    body = seen["body"]
+    assert body["model"] == "claude-haiku-5-5" and body["system"] == "系統提示"
+    assert body["output_config"] == {"effort": "low"}
+    assert "temperature" not in body  # Haiku 5.5 文件建議不要送 temperature
+
+
+def test_anthropic_client_requires_key(monkeypatch):
+    pytest.importorskip("anthropic")
+    from llm_agent.llm_client import AnthropicClient
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        AnthropicClient()
