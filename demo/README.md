@@ -28,7 +28,17 @@ python -m demo.run --planner llm
 
 想改用 Claude：在 `.env` 設 `AGENT_PROVIDER=anthropic` 並填 `ANTHROPIC_API_KEY`（Claude API 需要預付額度）。
 
-視窗下方可以輸入自然語言指令，按 Enter 送出，例如「三架一起把那台車包圍起來」「先懸停」「回家」。LLM 回覆通常要一到數秒；這段時間無人機會照上一個合法計畫飛，不會停下來等。
+**輸入指令**：視窗出現後，回到執行程式的終端機（PowerShell 或 VS Code 終端機）直接打字按 Enter，支援中文輸入法，例如「三架一起把那台車包圍起來」「先懸停」「回家」。視窗下方的輸入框也能用，但 matplotlib 不支援輸入法，只能打英文。LLM 回覆通常要一到數秒；這段時間無人機會照上一個合法計畫飛，不會停下來等。
+
+**操作員指令優先**：操作員指令產生的計畫會一直有效，直到下新指令。`hold`（懸停）與 `return_home`（返航）會讓 Agent 完全暫停；`search` 期間 Agent 不能自己切回包圍；`track` / `encircle` 期間只能在追蹤、包圍、搜尋（目標遺失時）之間切換。操作員指令的請求失敗會自動重送 2 次，仍失敗就改用規則式解讀。
+
+**預排指令**（報告要可重現時用）：`--cmd "秒數=指令"`，可重複，例如：
+
+```powershell
+python -m demo.run --planner llm --cmd "15=三架一起把那台車包圍起來" --cmd "60=先懸停"
+```
+
+**模型與備援**：預設主模型 `gemini-3.1-flash-lite`（上一代，尖峰時較少 503），忙線（503）、額度用完（429）或逾時時自動改用 `gemini-3.5-flash-lite`；面板標題會顯示「備援中」。
 
 ### 不開視窗，產生報告用的指標
 
@@ -57,7 +67,7 @@ python -m demo.run --planner llm --headless --duration 90
 |---|---|---|
 | 兔子（目標） | `sim2d/scenario.py` 合成路線 | B 的影片偵測 + `coord_transform/homography.py` 地面標定 |
 | 老鷹（無人機） | `sim2d/fleet_sim.py` 運動學替身 | A 的 3 架 PX4 SITL（輸入 GoalPoint、輸出 FleetPose，格式相同） |
-| 指揮官 | 規則式，或 LLM（預設 Gemini 3.5 Flash-Lite，可切換 Claude Haiku 5.5） | 不變 |
+| 指揮官 | 規則式，或 LLM（預設 Gemini 3.1 Flash-Lite，備援 3.5 Flash-Lite，可切換 Claude Haiku 5.5） | 不變 |
 
 ## 安全設計（口試重點）
 
@@ -68,5 +78,5 @@ python -m demo.run --planner llm --headless --duration 90
 ## 可以調的參數
 
 - `--period`：多久問一次 Agent（預設 2 秒）。越短反應越快，但 API 花費和排隊都會增加。
-- `.env` 的 `AGENT_PROVIDER`（`gemini` / `anthropic`）、`AGENT_MODEL`（預設 `gemini-3.5-flash-lite`）、`AGENT_THINKING`（Gemini 思考程度，例如 `minimal` 可降低延遲）、`AGENT_TIMEOUT_S`（預設 10）。
+- `.env` 的 `AGENT_PROVIDER`（`gemini` / `anthropic`）、`AGENT_MODEL`（預設 `gemini-3.1-flash-lite`）、`AGENT_FALLBACK_MODELS`（預設 `gemini-3.5-flash-lite`，逗號分隔，空字串代表不備援）、`AGENT_THINKING`（Gemini 思考程度，例如 `minimal` 可降低延遲）、`AGENT_TIMEOUT_S`（預設 10）。
 - `--seed`：換一條兔子路線。
