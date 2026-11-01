@@ -1,0 +1,10 @@
+{
+  "_comment": "Example only. Copy to config/video_ground.json and replace with real points picked on the demo video (>= 4 ground points spread over the frame). ground_ne_m is in metres in world_ned (n = north/up, e = east/right).",
+  "video_id": "example",
+  "points": [
+    {"pixel": [100, 80],   "ground_ne_m": [40.0, -30.0]},
+    {"pixel": [1180, 60],  "ground_ne_m": [41.0, 24.0]},
+    {"pixel": [1200, 900], "ground_ne_m": [-1.0, 25.0]},
+    {"pixel": [90, 920],   "ground_ne_m": [-2.0, -31.0]}
+  ]
+}
