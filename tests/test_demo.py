@@ -83,3 +83,28 @@ def test_demo_cli_headless_writes_outputs(tmp_path):
     m = main(["--headless", "--duration", "5", "--out", str(tmp_path)])
     assert (tmp_path / "metrics.json").exists() and (tmp_path / "events.jsonl").exists()
     assert m["duration_s"] == pytest.approx(5.0)
+
+
+def test_scripted_operator_commands_take_effect_and_hold_persists():
+    from demo.run import feed_scripted, parse_scripted
+
+    scripted = parse_scripted(["30=先懸停", "10=三架包圍那台車"])
+    assert scripted == [(10.0, "三架包圍那台車"), (30.0, "先懸停")]
+    c = Commander(IDS, llm=None, period_s=2.0)
+    eng = DemoEngine(CAM, ERR, c, rabbit=RabbitConfig(seed=0), seed=0)
+    for _ in range(600):  # 60 秒
+        feed_scripted(eng, scripted)
+        eng.step()
+    ops = [e for e in c.events if e.trigger == "operator"]
+    # 第 10 秒還沒看到車：「包圍」只能先搜尋，且不鎖定，之後發現車就自動包圍
+    assert [e.plan["mode"] for e in ops] == ["search", "hold"]
+    assert any(e.plan and e.plan["mode"] == "encircle" and e.trigger != "operator" for e in c.events)
+    assert all(e.timestamp_ns <= ops[-1].timestamp_ns for e in c.events)  # hold 之後 Agent 不再自己出計畫
+    assert c.current.mode == "hold" and c.paused and scripted == []
+
+
+def test_parse_scripted_rejects_bad_format():
+    from demo.run import parse_scripted
+
+    with pytest.raises(SystemExit):
+        parse_scripted(["沒有等號"])

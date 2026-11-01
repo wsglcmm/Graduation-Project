@@ -3,11 +3,13 @@
     python -m demo.run                          # 規則式指揮官（不需要 API 金鑰）
     python -m demo.run --planner llm            # 接 LLM（預設 Gemini，需要 .env 裡的 GEMINI_API_KEY）
     python -m demo.run --headless --duration 90 # 不開視窗，跑完輸出指標（報告用）
+    python -m demo.run --cmd "15=三架一起把那台車包圍起來"  # 第 15 秒自動送出指令（可重複，報告用可重現）
 
 畫面左邊是鳥瞰圖：彩色三角形 = 無人機（半透明框 = 相機視野），灰色 × = 兔子真值，
 黑點與圓圈 = 融合 + 卡爾曼後的估計與 uncertainty_m，小空心圓 = 隊形規劃給的目標點。
 右邊是 Agent 指令面板：每一筆計畫的時間、規劃者（LLM / 規則）、延遲、模式、角色與理由。
-視窗下方可以輸入自然語言指令（例如「三架一起把那台車包圍起來」「先懸停」），按 Enter 送出。
+指令輸入：在執行程式的終端機（PowerShell / VS Code 終端機）直接打字按 Enter，支援中文輸入法；
+視窗下方的輸入框也可以用，但 matplotlib 不支援輸入法，只能打英文。
 
 目前兔子路線是合成的、無人機是運動學替身；之後換成「B 的影片偵測 + 地面標定」與「A 的 3 架 SITL」，
 介面相同（規格 §10），Agent 與融合程式不用改。
@@ -15,8 +17,11 @@
 import argparse
 import json
 import math
+import sys
+import threading
 import time
 from pathlib import Path
+from typing import List, Tuple
 
 from coord_transform.config import load_camera_config, load_error_model
 from demo.engine import DemoEngine
@@ -43,18 +48,58 @@ def make_commander(planner: str, period_s: float) -> Commander:
 def event_line(ev) -> str:
     t = ev.timestamp_ns / 1e9
     who = "LLM" if ev.planner == "llm" else "規則"
+    if ev.trigger == "operator":
+        who += "［操作員］"
     if not ev.valid:
         return f"[{t:5.1f}s] {who} {ev.latency_ms:5.0f}ms 不合法：{ev.error[:40]}"
     p = ev.plan
     roles = " ".join(f"{a['drone_id'][-1]}:{ROLE_ZH[a['role']]}" for a in p["assignments"])
     head = f"[{t:5.1f}s] {who} {ev.latency_ms:5.0f}ms  {MODE_ZH[p['mode']]}  {roles}"
+    if ev.plan_id is None:  # 已被操作員新指令取代
+        head += "（未套用）"
     return head + f"\n          {p['reason']}"
 
 
-def run_headless(engine: DemoEngine, duration_s: float, realtime: bool) -> None:
+def parse_scripted(items: List[str]) -> List[Tuple[float, str]]:
+    """--cmd "秒數=指令" → [(秒數, 指令)]，依時間排序。"""
+    out = []
+    for item in items or []:
+        t, sep, text = item.partition("=")
+        if not sep or not text.strip():
+            raise SystemExit(f"--cmd 格式應為 秒數=指令，收到：{item!r}")
+        out.append((float(t), text.strip()))
+    return sorted(out)
+
+
+def feed_scripted(engine: DemoEngine, scripted: List[Tuple[float, str]]) -> None:
+    """到時間的預排指令送給指揮官（會從 scripted 移除）。"""
+    while scripted and engine.t_ns / 1e9 >= scripted[0][0]:
+        engine.commander.command(scripted.pop(0)[1])
+
+
+def start_terminal_input(engine: DemoEngine) -> None:
+    """背景執行緒讀終端機輸入，每行送一次指令。終端機支援中文輸入法，matplotlib 輸入框不支援。"""
+    if sys.stdin is None or not sys.stdin.isatty():
+        return
+
+    def loop():
+        for line in sys.stdin:
+            text = line.strip()
+            if text:
+                engine.commander.command(text)
+                print(f"  → 已送出指令：{text}", flush=True)
+
+    threading.Thread(target=loop, name="terminal-input", daemon=True).start()
+    print("可以在這個終端機輸入指令（支援中文），按 Enter 送出；關閉視窗結束。", flush=True)
+
+
+def run_headless(engine: DemoEngine, duration_s: float, realtime: bool, scripted: List[Tuple[float, str]]) -> None:
+    if realtime:  # 照真實時間跑時才有空打字；快轉模式請用 --cmd 預排
+        start_terminal_input(engine)
     steps = int(duration_s / engine.dt)
     for _ in range(steps):
         t0 = time.monotonic()
+        feed_scripted(engine, scripted)
         for ev in engine.step():
             print(event_line(ev))
         if realtime:  # LLM 模式要照真實時間跑，延遲才有意義
@@ -62,7 +107,7 @@ def run_headless(engine: DemoEngine, duration_s: float, realtime: bool) -> None:
     engine.commander.wait_idle()
 
 
-def run_gui(engine: DemoEngine, speed: float) -> None:
+def run_gui(engine: DemoEngine, speed: float, scripted: List[Tuple[float, str]]) -> None:
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
     from matplotlib.patches import Circle, Polygon
@@ -74,9 +119,10 @@ def run_gui(engine: DemoEngine, speed: float) -> None:
     ax = fig.add_axes([0.04, 0.12, 0.55, 0.82])
     panel = fig.add_axes([0.62, 0.12, 0.36, 0.82])
     panel.axis("off")
-    box_ax = fig.add_axes([0.04, 0.03, 0.55, 0.05])
-    box = TextBox(box_ax, "指令 ", initial="")
+    box_ax = fig.add_axes([0.10, 0.03, 0.49, 0.05])  # 左邊留空間給標籤
+    box = TextBox(box_ax, "指令（英文）", initial="")
     box.on_submit(lambda text: (engine.commander.command(text), box.set_val("")) if text.strip() else None)
+    start_terminal_input(engine)
 
     ax.set_facecolor("#fcfcfb")
     ax.set_aspect("equal")
@@ -105,6 +151,7 @@ def run_gui(engine: DemoEngine, speed: float) -> None:
 
     def update(_):
         for _ in range(max(1, int(round(speed)))):
+            feed_scripted(engine, scripted)
             for ev in engine.step():
                 lines.insert(0, event_line(ev))
         del lines[9:]
@@ -131,9 +178,19 @@ def run_gui(engine: DemoEngine, speed: float) -> None:
         title.set_text(f"t = {engine.t_ns / 1e9:5.1f} s   目標：{status}（看到的：{seen}）   模式：{MODE_ZH[plan.mode] if plan else '—'}")
         panel.clear()
         panel.axis("off")
-        name = "LLM（" + getattr(engine.commander.llm, "name", "") + "）" if engine.commander.llm else "規則式"
+        llm = engine.commander.llm
+        name = "規則式"
+        if llm:
+            name = "LLM（" + getattr(llm, "name", "") + "）"
+            used = getattr(llm, "last_model", None)
+            if used and used != getattr(llm, "model", used):
+                name += f"　備援中：{used}"
         panel.text(0, 1.0, f"Agent 指令面板　規劃者：{name}", fontsize=12, weight="bold", va="top")
-        panel.text(0, 0.95, "\n".join(lines) or "（等待第一個計畫）", fontsize=9, va="top", linespacing=1.45)
+        c = engine.commander
+        if c.directive:
+            lock = "（Agent 暫停，等待新指令）" if c.paused else ""
+            panel.text(0, 0.955, f"操作員有效指令：{c.directive_text}　→ {MODE_ZH[c.directive]}{lock}", fontsize=9, color="#b4380b", va="top")
+        panel.text(0, 0.92, "\n".join(lines) or "（等待第一個計畫）", fontsize=9, va="top", linespacing=1.45)
         m = engine.summary()
         enc = f"{m['time_to_encircle_s']:.1f} s" if m["time_to_encircle_s"] else "尚未"
         panel.text(0, 0.02, f"包圍完成：{enc}　視野內比例：{m['visible_fraction']:.0%}　最小機間距離：{m['min_drone_distance_m']:.1f} m",
@@ -153,17 +210,19 @@ def main(argv=None):
     ap.add_argument("--speed", type=float, default=1.0, help="畫面模式的播放倍速")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=None, help="指標與事件輸出資料夾（預設 output/demo/<時間>）")
+    ap.add_argument("--cmd", action="append", default=[], metavar="秒數=指令", help="預排操作員指令，可重複（例如 15=三架包圍那台車）")
     args = ap.parse_args(argv)
 
     cam = load_camera_config(ROOT / "config" / "camera.yaml")
     err = load_error_model(ROOT / "config" / "error_model.yaml")
+    scripted = parse_scripted(args.cmd)
     commander = make_commander(args.planner, args.period)
     engine = DemoEngine(cam, err, commander, rabbit=RabbitConfig(seed=args.seed), seed=args.seed)
     try:
         if args.headless:
-            run_headless(engine, args.duration, realtime=args.planner == "llm")
+            run_headless(engine, args.duration, realtime=args.planner == "llm", scripted=scripted)
         else:
-            run_gui(engine, args.speed)
+            run_gui(engine, args.speed, scripted)
     finally:
         commander.close()
 
