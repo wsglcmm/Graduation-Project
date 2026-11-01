@@ -36,7 +36,8 @@ def load_dotenv(path=".env") -> None:
 
 
 class AnthropicClient:
-    def __init__(self, model: Optional[str] = None, max_tokens: int = 1024, timeout_s: Optional[float] = None, effort: Optional[str] = None):
+    def __init__(self, model: Optional[str] = None, max_tokens: int = 1024, timeout_s: Optional[float] = None,
+                 effort: Optional[str] = None, sdk_client=None):
         try:
             import anthropic
         except ImportError as e:
@@ -47,7 +48,7 @@ class AnthropicClient:
         self.max_tokens = max_tokens
         self.timeout_s = timeout_s if timeout_s is not None else float(os.environ.get("AGENT_TIMEOUT_S", "10"))
         self.effort = effort if effort is not None else os.environ.get("AGENT_EFFORT", "low")
-        self._client = anthropic.Anthropic()
+        self._client = sdk_client or anthropic.Anthropic()  # sdk_client 供測試注入
         self.name = f"anthropic:{self.model}"
 
     def complete(self, system: str, messages: List[dict]) -> str:
