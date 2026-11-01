@@ -195,3 +195,51 @@ def test_session_without_detections_is_pose_only(tmp_path):
     with pytest.raises(SystemExit, match="detections.jsonl"):
         replay.main([str(d), "--no-plots", "--out", str(tmp_path / "out")])
 
+
+def _shift_positions(d, lead_ms):
+    """把 poses 的位置換成「真值在 t + lead_ms」的位置（位置領先時間戳），姿態不動；並補上速度。"""
+    ses = load_session(d)
+    rows = []
+    for r in ses.poses:
+        t = r["timestamp_ns"]
+        a, b = ses.drone_pose_ned(t + int(lead_ms * 1e6)), ses.drone_pose_ned(t + int((lead_ms + 20) * 1e6))
+        if a is None or b is None:
+            continue
+        r = dict(r, position_ned_m={"n": a.n, "e": a.e, "d": a.d},
+                 velocity_ned_mps={"n": (b.n - a.n) / 0.02, "e": (b.e - a.e) / 0.02, "d": (b.d - a.d) / 0.02})
+        rows.append(r)
+    (d / "poses.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+
+
+def test_estimate_position_lag_recovers_injected_lead(tmp_path):
+    d = generate(tmp_path / "s", CAM, NOISELESS)
+    _shift_positions(d, 80.0)
+    est = cal.estimate_position_lag(load_session(d), stride=1, min_samples=50)
+    assert est["reliable"] and est["lag_ms"] == pytest.approx(-80.0, abs=4.0)
+    # 套用估計值後位置誤差接近 0，姿態比對不受影響
+    fixed = cal.pose_errors(load_session(d), position_lag_ns=int(est["lag_ms"] * 1e6))
+    assert fixed["n"]["rms"] < 0.05 and fixed["e"]["rms"] < 0.05
+    assert fixed["yaw"]["rms"] == pytest.approx(cal.pose_errors(load_session(d))["yaw"]["rms"])
+
+
+def test_yaw_bias_triggers_rms_suggestion(tmp_path):
+    d = generate(tmp_path / "s", CAM, dataclasses.replace(NOISELESS, duration_s=2.0))
+    rows = [json.loads(line) for line in (d / "poses.jsonl").read_text(encoding="utf-8").splitlines()]
+    for r in rows:  # 模擬 EKF 航向沒對準：固定 +4°
+        r["attitude_rad"]["yaw"] += math.radians(4.0)
+        r.pop("quaternion_wxyz", None)
+    (d / "poses.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    s, warnings = cal.suggest(cal.pose_errors(load_session(d)), {})
+    assert s["yaw_sigma_deg_rms"] == pytest.approx(4.0, abs=0.1)
+    assert any("系統性偏差" in w for w in warnings)
+
+
+def test_calibrate_cli_accepts_multiple_pose_only_sessions(tmp_path):
+    a = generate(tmp_path / "a", CAM, dataclasses.replace(NOISELESS, duration_s=1.0))
+    b = generate(tmp_path / "b", CAM, dataclasses.replace(NOISELESS, duration_s=1.0, seed=3))
+    for d in (a, b):
+        (d / "detections.jsonl").unlink()
+    s, warnings = cal.main([str(a), str(b), "--out", str(tmp_path / "cal")])
+    report = json.loads((tmp_path / "cal" / "calibration.json").read_text(encoding="utf-8"))
+    assert set(report["pose_per_session"]) == {"a", "b"} and "pixel_sigma_px" not in s
+    assert any("pose-only" in w for w in warnings)
