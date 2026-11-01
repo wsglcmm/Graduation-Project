@@ -21,6 +21,15 @@ def test_load_dotenv_does_not_override(tmp_path, monkeypatch):
     assert os.environ["FOO_A"] == "keep" and os.environ["FOO_B"] == "two"
 
 
+def test_load_dotenv_tolerates_bom(tmp_path, monkeypatch):
+    f = tmp_path / ".env"
+    f.write_bytes("FOO_BOM=x\n".encode("utf-8-sig"))  # Windows 記事本可能存成有 BOM 的 UTF-8
+    monkeypatch.delenv("FOO_BOM", raising=False)
+    load_dotenv(f)
+    import os
+
+    assert os.environ["FOO_BOM"] == "x"
+
 
 
 

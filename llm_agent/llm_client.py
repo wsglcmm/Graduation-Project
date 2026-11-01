@@ -47,7 +47,7 @@ def load_dotenv(path=".env") -> None:
     p = Path(path)
     if not p.exists():
         return
-    for line in p.read_text(encoding="utf-8").splitlines():
+    for line in p.read_text(encoding="utf-8-sig").splitlines():  # utf-8-sig：容忍記事本存檔時加的 BOM
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
