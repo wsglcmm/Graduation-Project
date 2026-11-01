@@ -148,3 +148,45 @@ def test_anthropic_client_requires_key(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
         AnthropicClient()
+
+
+# ---------- Gemini 客戶端（不連網：用 httpx 的 MockTransport 攔截請求）----------
+def test_gemini_client_request_and_text(monkeypatch):
+    pytest.importorskip("google.genai")
+    httpx = pytest.importorskip("httpx")
+    from google import genai
+    from llm_agent.llm_client import GeminiClient
+
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"candidates": [{"content": {"role": "model", "parts": [{"text": '{"mode": "hold"}'}]}, "finishReason": "STOP"}]})
+
+    sdk = genai.Client(api_key="test-key", http_options={"httpx_client": httpx.Client(transport=httpx.MockTransport(handler))})
+    client = GeminiClient(sdk_client=sdk, thinking="")
+    out = client.complete("系統提示", [{"role": "user", "content": "例子"}, {"role": "assistant", "content": "{}"}, {"role": "user", "content": "嗨"}])
+    assert out == '{"mode": "hold"}'
+    body = seen["body"]
+    assert "gemini-3.5-flash-lite" in seen["url"]
+    assert [c["role"] for c in body["contents"]] == ["user", "model", "user"]  # assistant → model
+    assert body["systemInstruction"]["parts"][0]["text"] == "系統提示"
+    assert body["generationConfig"]["responseMimeType"] == "application/json"
+
+
+def test_gemini_client_requires_key(monkeypatch):
+    pytest.importorskip("google.genai")
+    from llm_agent.llm_client import GeminiClient
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
+        GeminiClient()
+
+
+def test_create_llm_client_rejects_unknown_provider():
+    from llm_agent.llm_client import create_llm_client
+
+    with pytest.raises(ValueError, match="AGENT_PROVIDER"):
+        create_llm_client("openai")
