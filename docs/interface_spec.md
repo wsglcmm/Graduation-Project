@@ -1,6 +1,6 @@
 # 模組介面規格（Interface Specification）
 
-- 版本：`0.2.0`（草案：新增多機與影片 Demo 的介面，見 §10，待 A、B 確認）
+- 版本：`0.2.1`（§10 多機與影片 Demo 介面：A 已於 2026-11-01 合併 PR #3，同意 §10.1 local ↔ world 由 A 轉換、§10.6 目標點逾時與安全距離；§10.3 影片 Detection 待 B 確認）
 - §3–§7 的單機訊息 `schema_version` 仍為 `"0.1.0"`；§10 的新訊息為 `"0.2.0"`
 - 維護者：C
 - 適用範圍：B（影像辨識）→ C（座標轉換 / LLM Agent）→ A（模擬 / 飛控）
@@ -476,6 +476,10 @@ A 的責任（安全層最終生效）：
 | `valid` | 是否通過 schema 驗證 |
 | `plan` | 驗證後的 Plan（不合法時為 `null`） |
 | `error` | 不合法或逾時的原因 |
+| `operator_command` | 選填，觸發這筆計畫的操作員指令原文（`trigger = operator` 時） |
+| `model` | 選填，實際回應的 LLM 模型名稱（有備援模型時用來統計）；規則式為 `null` |
+
+AgentEvent 只在 C 內部使用（面板與報告指標），A、B 不需要實作。
 
 ---
 
@@ -487,3 +491,4 @@ A 的責任（安全層最終生效）：
 | 0.1.1 | 2026-10-19 | 依 A 回覆填入相機參數（§6）、姿態頻率與時間戳（§2.2、§2.3、§4）、ENU 警告（§2.1）；依 B 回覆補充 Detection 的影像來源要求（§3）；定義 `uncertainty_m`（§5） | C |
 | 0.1.2 | 2026-10-31 | 依 A 的實測回覆 §9 四項：odometry 時間戳與頻率、24 ms 的成因（§2.3、§4），`get_state()` 範例（§4），相機位移與參考點約定（§6）；補充 EKF yaw 偏差（§2.4）。訊息欄位沒有變動 | A（C 代為整理） |
 | 0.2.0 | 2026-11-01 | 草案：新增 §10 多機與影片 Demo 介面（world_ned、FleetPose、影片 Detection、FusedTarget、Agent Plan、GoalPoint、AgentEvent）；§1 補 Demo 資料流 | C |
+| 0.2.1 | 2026-11-01 | 標示確認狀態：A 合併 PR #3 同意 §10.1、§10.6；§10.3 待 B 確認。§10.7 補上 C 內部欄位 `operator_command`、`model`。A、B 的訊息格式沒有變動 | C |
