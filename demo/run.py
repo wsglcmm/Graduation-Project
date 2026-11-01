@@ -1,7 +1,7 @@
 """端到端 Demo：鳥瞰圖 + Agent 指令即時面板（今晚可跑的版本）。
 
     python -m demo.run                          # 規則式指揮官（不需要 API 金鑰）
-    python -m demo.run --planner llm            # 接 Claude（需要 .env 裡的 ANTHROPIC_API_KEY）
+    python -m demo.run --planner llm            # 接 LLM（預設 Gemini，需要 .env 裡的 GEMINI_API_KEY）
     python -m demo.run --headless --duration 90 # 不開視窗，跑完輸出指標（報告用）
 
 畫面左邊是鳥瞰圖：彩色三角形 = 無人機（半透明框 = 相機視野），灰色 × = 兔子真值，
@@ -34,10 +34,10 @@ def make_commander(planner: str, period_s: float) -> Commander:
     ids = ["uav1", "uav2", "uav3"]
     if planner == "rule":
         return Commander(ids, llm=None, period_s=period_s)
-    from llm_agent.llm_client import AnthropicClient, load_dotenv
+    from llm_agent.llm_client import create_llm_client, load_dotenv
 
     load_dotenv(ROOT / ".env")
-    return Commander(ids, llm=AnthropicClient(), period_s=period_s)
+    return Commander(ids, llm=create_llm_client(), period_s=period_s)  # AGENT_PROVIDER：gemini（預設）/ anthropic
 
 
 def event_line(ev) -> str:

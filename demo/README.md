@@ -16,14 +16,17 @@ python -m demo.run
 
 這是**規則式指揮官**，不需要 API 金鑰，先用它確認畫面正常。
 
-### 接上 Claude（LLM 模式）
+### 接上 LLM（預設 Gemini）
 
-1. 把 `env.example` 複製成 `.env`，填入你的 Anthropic API 金鑰。`.env` 已在 `.gitignore`，**絕對不要 commit**。
-2. 執行：
+1. 到 Google AI Studio 建立 Gemini API 金鑰（免費層即可；免費層的內容會被 Google 用來改善產品，不要放敏感資料）。
+2. 把 `env.example` 複製成 `.env`，填入 `GEMINI_API_KEY`。`.env` 已在 `.gitignore`，**絕對不要 commit**。
+3. 執行：
 
 ```powershell
 python -m demo.run --planner llm
 ```
+
+想改用 Claude：在 `.env` 設 `AGENT_PROVIDER=anthropic` 並填 `ANTHROPIC_API_KEY`（Claude API 需要預付額度）。
 
 視窗下方可以輸入自然語言指令，按 Enter 送出，例如「三架一起把那台車包圍起來」「先懸停」「回家」。LLM 回覆通常要一到數秒；這段時間無人機會照上一個合法計畫飛，不會停下來等。
 
@@ -54,7 +57,7 @@ python -m demo.run --planner llm --headless --duration 90
 |---|---|---|
 | 兔子（目標） | `sim2d/scenario.py` 合成路線 | B 的影片偵測 + `coord_transform/homography.py` 地面標定 |
 | 老鷹（無人機） | `sim2d/fleet_sim.py` 運動學替身 | A 的 3 架 PX4 SITL（輸入 GoalPoint、輸出 FleetPose，格式相同） |
-| 指揮官 | 規則式或 Claude Haiku 5.5 | 不變 |
+| 指揮官 | 規則式，或 LLM（預設 Gemini 3.5 Flash-Lite，可切換 Claude Haiku 5.5） | 不變 |
 
 ## 安全設計（口試重點）
 
@@ -65,5 +68,5 @@ python -m demo.run --planner llm --headless --duration 90
 ## 可以調的參數
 
 - `--period`：多久問一次 Agent（預設 2 秒）。越短反應越快，但 API 花費和排隊都會增加。
-- `.env` 的 `AGENT_MODEL`（預設 `claude-haiku-5-5`，官方標示延遲最低）、`AGENT_EFFORT`（預設 `low`，降低延遲）、`AGENT_TIMEOUT_S`（預設 10）。
+- `.env` 的 `AGENT_PROVIDER`（`gemini` / `anthropic`）、`AGENT_MODEL`（預設 `gemini-3.5-flash-lite`）、`AGENT_THINKING`（Gemini 思考程度，例如 `minimal` 可降低延遲）、`AGENT_TIMEOUT_S`（預設 10）。
 - `--seed`：換一條兔子路線。
