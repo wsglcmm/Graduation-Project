@@ -113,3 +113,19 @@ class DetectionFrame(_Msg):
     image_width: StrictInt = Field(ge=1)
     image_height: StrictInt = Field(ge=1)
     detections: List[Detection]
+
+
+# ---------- §10.3 影片來源 Detection（B → C）----------
+class VideoDetectionFrame(DetectionFrame):
+    """§3 加上來源欄位。source = "video" 時 timestamp_ns 是影片時間（從開頭起算），且 video_id 必填。"""
+
+    source: Literal["video", "gazebo"]
+    video_id: Optional[str] = None
+    drone_id: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _video_needs_id(self):
+        if self.source == "video" and not self.video_id:
+            raise ValueError("source = video 時 video_id 必填（規格 §10.3）")
+        return self
+
