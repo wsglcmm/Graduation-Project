@@ -1,7 +1,7 @@
 # 模組介面規格（Interface Specification）
 
-- 版本：`0.1.2`（A 的待確認項目已回覆；B 仍有待確認項目，見 §9）
-- 訊息的 `schema_version` 仍為 `"0.1.0"`（本版沒有新增或更改欄位）
+- 版本：`0.2.0`（草案：新增多機與影片 Demo 的介面，見 §10，待 A、B 確認）
+- §3–§7 的單機訊息 `schema_version` 仍為 `"0.1.0"`；§10 的新訊息為 `"0.2.0"`
 - 維護者：C
 - 適用範圍：B（影像辨識）→ C（座標轉換 / LLM Agent）→ A（模擬 / 飛控）
 
@@ -20,6 +20,19 @@
                                     │
                                     ▼
                     C: LLM Agent ──(介面 4: Action)──→ A: MAVSDK 控制
+```
+
+最終 Demo（影片 + 模擬混合，介面見 §10）：
+
+```
+[鳥瞰影片] → B: 偵測 / 追蹤 ──(§10.3 影片 Detection)──→ C: 地面標定 + 各機視野 + 融合 + 卡爾曼
+                                                              │ (§10.4 FusedTarget)
+[3 架 PX4 SITL] → A ──(§10.2 FleetPose, world_ned)──→ C ──────┤
+                                                              ▼
+                       C: Agent（§10.5 Plan，0.5–2 Hz）→ C: 隊形規劃（10 Hz）
+                                                              │ (§10.6 GoalPoint)
+                                                              ▼
+                                                A: 各機目標點追蹤 + 安全層
 ```
 
 ---
@@ -345,13 +358,132 @@ LLM 不直接輸出底層控制量，只能從下列**白名單動作**中選擇
 - [ ] （B）改接 Gazebo 相機影像（1280×960、sim time 時間戳）
 - [ ] （B）確認 bbox 為原始影像像素（`boxes.xyxy`），並回報端到端延遲
 - [ ] （B）class 列表是否與本文件一致
+- [ ] （A）§10.1：由 A 做 local ↔ world 轉換，並提供各機 `origin_world_ned_m`
+- [ ] （A）§10.6：各機目標點追蹤、1 秒逾時懸停、最小機間距離與高度分層的數值
+- [ ] （B）§10.3：影片 Detection 的 `source`、`video_id` 欄位與影片時間戳
+- [ ] （全員）§10.5：Agent 角色清單是否足夠
 - [ ] （全員）傳輸方式
 - [ ] （全員）Agent 的角色定位（老師確認）
 
-## 10. 變更紀錄
+
+## 10. 多機協同與影片 Demo（v0.2.0 新增，待 A、B 確認）
+
+設計原則：**LLM 只決定「誰扮演什麼角色、用什麼隊形」**；「每架飛到哪裡」由 C 的確定性隊形規劃器算出各機目標點；「怎麼安全地飛過去」由 A 的飛控與安全層負責。LLM 失效時，系統沿用上一個合法計畫或懸停。
+
+### 10.1 共同世界座標 `world_ned`
+
+- 多機時每架 PX4 的 local NED 原點都是自己的起飛點，三架互不相同。**跨模組的多機訊息一律使用共同的 `world_ned`**：軸向與 §2.1 的 NED 相同（n 北、e 東、d 下），原點為 Demo 場景的地面原點。
+- **由 A 負責 local ↔ world 轉換**：A 知道每架的起飛位置 `origin_world_ned_m`，送出位姿前加上、收到目標點後減去。轉換只在一個地方做，C 與 Agent 只看到單一座標系。
+- 影片 Demo：`world_ned` 就是影片地面標定（homography）的地面座標系，原點與方向由 `config/video_ground.json` 的標定點決定；SITL 在空曠的 Gazebo 世界飛行，位置直接疊到影片上。
+- Gazebo 技術驗證：`world_ned` = Gazebo 世界原點轉成 NED（ENU → NED 見 §2.1）。
+
+### 10.2 `drone_id` 與 FleetPose（A → C，每架約 10–100 Hz）
+
+`drone_id` 為字串：`"uav1"`、`"uav2"`、`"uav3"`。
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| `schema_version` | string | `"0.2.0"` |
+| `drone_id` | string | 哪一架 |
+| `timestamp_ns` | int64 | sim time（同 §2.2） |
+| `position_world_ned_m` | object | `n, e, d`（world_ned） |
+| `attitude_rad` | object | `roll, pitch, yaw`（同 §4） |
+| `velocity_world_ned_mps` | object | 選填，`n, e, d` |
+| `status` | string | `"landed"` / `"flying"` / `"failsafe"` |
+
+### 10.3 影片來源 Detection（B → C）
+
+格式同 §3，另加：
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| `source` | string | `"video"`（影片 Demo）或 `"gazebo"`（技術驗證，§3 的原始用法） |
+| `video_id` | string | 影片檔名或資料集場景代號（`source = "video"` 時必填） |
+| `drone_id` | string | 選填；Gazebo 多機時表示哪一架的相機 |
+
+- `source = "video"` 時，`timestamp_ns` = **影片時間**（從影片開頭起算的奈秒），`image_width / image_height` = 影片解析度。影片時間與模擬時間的對應由 C 的 Demo 播放器負責。
+- 影片偵測由 C 用地面標定（homography）換成 world 座標，不使用 §5 的相機模型。
+
+### 10.4 FusedTarget（C 內部 → Agent / 面板）
+
+C 依各機視野判斷誰看得到目標，以 `uncertainty_m` 加權融合，再經卡爾曼濾波：
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| `target_id` | int | 全域目標編號（跨無人機） |
+| `class` | string | 同 §3 |
+| `status` | string | `"tracking"`（本幀有觀測）/ `"predicted"`（暫時沒看到，用模型外推）/ `"lost"` |
+| `position_world_ned_m` | object | `n, e` |
+| `velocity_world_ned_mps` | object | `n, e`（卡爾曼估計） |
+| `uncertainty_m` | float | 1σ 水平誤差（DRMS，定義同 §5） |
+| `observed_by` | array[string] | 本幀看得到目標的 `drone_id` |
+| `last_seen_ns` | int64 | 最後一次有觀測的時間 |
+
+### 10.5 Agent 多機計畫 Plan（LLM 輸出，C 驗證後使用）
+
+LLM 只輸出下列 JSON，C 以 pydantic strict schema 驗證，不合法就丟棄並沿用上一個計畫：
+
+```json
+{
+  "mode": "encircle",
+  "target_id": 1,
+  "assignments": [
+    {"drone_id": "uav1", "role": "chaser"},
+    {"drone_id": "uav2", "role": "blocker_left"},
+    {"drone_id": "uav3", "role": "blocker_right"}
+  ],
+  "formation": {"radius_m": 15.0},
+  "reason": "目標往東北移動，兩翼從前方攔截、uav1 從後方追"
+}
+```
+
+| 欄位 | 規則 |
+|---|---|
+| `mode` | `search` / `track` / `encircle` / `hold` / `return_home` |
+| `target_id` | `track`、`encircle` 必填，且必須是目前存在的目標 |
+| `assignments` | 每架無人機恰好出現一次；`role` 為 `chaser` / `blocker_left` / `blocker_right` / `overwatch` / `searcher` / `idle` |
+| `formation.radius_m` | 5–60 m（包圍或跟隨半徑；預設 15） |
+| `reason` | 必填，≤ 80 字，顯示在 Agent 指令面板 |
+
+`plan_id`、時間戳與延遲由 C 加上，不由 LLM 產生。單機的 §7 白名單維持不變，供單機測試使用。
+
+### 10.6 GoalPoint（C → A，各機目標點，5–10 Hz）
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| `schema_version` | string | `"0.2.0"` |
+| `plan_id` | string | 由哪一個計畫產生 |
+| `drone_id` | string | 給哪一架 |
+| `timestamp_ns` | int64 | 產生時間（sim time） |
+| `position_world_ned_m` | object | `n, e, d`（world_ned） |
+| `yaw_rad` | float | 選填，期望航向（例如機頭朝向目標） |
+| `max_speed_mps` | float | 選填，不得超過 A 的速度上限 |
+
+A 的責任（安全層最終生效）：
+- 追蹤目標點；**超過 1.0 秒沒收到新的目標點就懸停**。
+- 最小機間水平距離（提議 5 m）與高度分層（提議 uav1 / uav2 / uav3 = 25 / 30 / 35 m）；必要時修改目標點，並在 FleetPose 的 `status` 或日誌中註明。
+- 地理圍欄（對應影片場景範圍）。
+
+### 10.7 AgentEvent（C 內部，Agent 指令面板的每一筆紀錄）
+
+| 欄位 | 說明 |
+|---|---|
+| `timestamp_ns` | 產生時間 |
+| `plan_id` | 計畫編號 |
+| `trigger` | `periodic` / `target_lost` / `target_found` / `operator` |
+| `planner` | `llm` / `rule`（規則式備援） |
+| `latency_ms` | 從觸發到得到合法計畫的時間 |
+| `valid` | 是否通過 schema 驗證 |
+| `plan` | 驗證後的 Plan（不合法時為 `null`） |
+| `error` | 不合法或逾時的原因 |
+
+---
+
+## 11. 變更紀錄
 
 | 版本 | 日期 | 變更 | 作者 |
 |---|---|---|---|
 | 0.1.0 | 2026-10 | 初稿 | C |
 | 0.1.1 | 2026-10-19 | 依 A 回覆填入相機參數（§6）、姿態頻率與時間戳（§2.2、§2.3、§4）、ENU 警告（§2.1）；依 B 回覆補充 Detection 的影像來源要求（§3）；定義 `uncertainty_m`（§5） | C |
 | 0.1.2 | 2026-10-31 | 依 A 的實測回覆 §9 四項：odometry 時間戳與頻率、24 ms 的成因（§2.3、§4），`get_state()` 範例（§4），相機位移與參考點約定（§6）；補充 EKF yaw 偏差（§2.4）。訊息欄位沒有變動 | A（C 代為整理） |
+| 0.2.0 | 2026-11-01 | 草案：新增 §10 多機與影片 Demo 介面（world_ned、FleetPose、影片 Detection、FusedTarget、Agent Plan、GoalPoint、AgentEvent）；§1 補 Demo 資料流 | C |
