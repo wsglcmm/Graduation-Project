@@ -23,6 +23,7 @@ def test_load_dotenv_does_not_override(tmp_path, monkeypatch):
 
 
 
+
 # ---------- 規則式 ----------
 def test_rule_search_when_no_target():
     p = rule_plan(DRONES, [])
@@ -169,7 +170,8 @@ def test_gemini_client_request_and_text(monkeypatch):
     out = client.complete("系統提示", [{"role": "user", "content": "例子"}, {"role": "assistant", "content": "{}"}, {"role": "user", "content": "嗨"}])
     assert out == '{"mode": "hold"}'
     body = seen["body"]
-    assert "gemini-3.5-flash-lite" in seen["url"]
+    assert "gemini-3.1-flash-lite" in seen["url"]  # 預設主模型
+    assert client.last_model == "gemini-3.1-flash-lite"
     assert [c["role"] for c in body["contents"]] == ["user", "model", "user"]  # assistant → model
     assert body["systemInstruction"]["parts"][0]["text"] == "系統提示"
     assert body["generationConfig"]["responseMimeType"] == "application/json"
@@ -190,3 +192,77 @@ def test_create_llm_client_rejects_unknown_provider():
 
     with pytest.raises(ValueError, match="AGENT_PROVIDER"):
         create_llm_client("openai")
+
+
+def _gemini_with(handler, **kw):
+    pytest.importorskip("google.genai")
+    httpx = pytest.importorskip("httpx")
+    from google import genai
+    from llm_agent.llm_client import GeminiClient
+
+    sdk = genai.Client(api_key="test-key", http_options={"httpx_client": httpx.Client(transport=httpx.MockTransport(handler))})
+    return GeminiClient(sdk_client=sdk, **kw)
+
+
+def _ok(httpx, text='{"mode": "hold"}'):
+    return httpx.Response(200, json={"candidates": [{"content": {"role": "model", "parts": [{"text": text}]}, "finishReason": "STOP"}]})
+
+
+def test_gemini_falls_back_to_next_model_on_503():
+    httpx = pytest.importorskip("httpx")
+    urls = []
+
+    def handler(request):
+        urls.append(str(request.url))
+        if "model-a" in str(request.url):
+            return httpx.Response(503, json={"error": {"code": 503, "message": "high demand", "status": "UNAVAILABLE"}})
+        return _ok(httpx)
+
+    client = _gemini_with(handler, model="model-a", fallbacks="model-b", thinking="")
+    assert client.complete("s", [{"role": "user", "content": "hi"}]) == '{"mode": "hold"}'
+    assert ["model-a" in urls[0], "model-b" in urls[1]] == [True, True]
+    assert client.last_model == "model-b"
+
+
+def test_gemini_does_not_fall_back_on_bad_key():
+    httpx = pytest.importorskip("httpx")
+    urls = []
+
+    def handler(request):
+        urls.append(str(request.url))
+        return httpx.Response(400, json={"error": {"code": 400, "message": "API key not valid", "status": "INVALID_ARGUMENT"}})
+
+    client = _gemini_with(handler, model="model-a", fallbacks="model-b", thinking="")
+    with pytest.raises(Exception, match="API key"):
+        client.complete("s", [{"role": "user", "content": "hi"}])
+    assert len(urls) == 1  # 金鑰錯誤換模型也沒用，直接回報
+
+
+def test_gemini_all_models_busy_raises_last_error():
+    httpx = pytest.importorskip("httpx")
+
+    def handler(request):
+        return httpx.Response(503, json={"error": {"code": 503, "message": "high demand", "status": "UNAVAILABLE"}})
+
+    client = _gemini_with(handler, model="model-a", fallbacks="model-b, model-c", thinking="")
+    assert client.models == ["model-a", "model-b", "model-c"]
+    with pytest.raises(Exception, match="503"):
+        client.complete("s", [{"role": "user", "content": "hi"}])
+
+
+def test_gemini_drops_unsupported_thinking_level():
+    httpx = pytest.importorskip("httpx")
+    bodies = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        if "thinkingConfig" in body.get("generationConfig", {}):
+            return httpx.Response(400, json={"error": {"code": 400, "message": "thinking_level MINIMAL is not supported", "status": "INVALID_ARGUMENT"}})
+        return _ok(httpx)
+
+    client = _gemini_with(handler, model="model-a", fallbacks="", thinking="minimal")
+    assert client.complete("s", [{"role": "user", "content": "hi"}]) == '{"mode": "hold"}'
+    client.complete("s", [{"role": "user", "content": "hi"}])
+    assert len(bodies) == 3  # 第一次 400 → 不帶 thinking 重送；之後記住，不再送 thinking
+
