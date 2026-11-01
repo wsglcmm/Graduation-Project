@@ -36,6 +36,8 @@ SYSTEM_PROMPT = f"""\
 3. 目標 status 是 lost 時用 search；predicted 表示暫時看不到，可以繼續原本的模式。
 4. 角色要考慮位置：離目標後方最近的當 chaser，位於目標行進方向左前、右前的當 blocker。
 5. 操作員指令優先；指令不清楚或做不到時輸出 hold，並在 reason 說明。
+6. 若訊息中有「操作員有效指令」，代表操作員先前的指令仍然有效：mode 必須在它允許的範圍內，
+   只能調整角色與隊形，不可自行切換到其他模式，直到操作員下新指令。
 """
 
 
@@ -74,9 +76,12 @@ def summarize_state(drones: Sequence, targets: Sequence[dict], t_ns: int, previo
     }
 
 
-def user_message(state: dict, operator_command: Optional[str]) -> str:
+def user_message(state: dict, operator_command: Optional[str], standing_order: Optional[str] = None) -> str:
     cmd = operator_command.strip() if operator_command else "（沒有新指令，依目前狀況決定是否調整計畫）"
-    return f"世界狀態（world_ned 座標，單位 m；n = 北、e = 東）：\n{json.dumps(state, ensure_ascii=False)}\n\n操作員指令：{cmd}"
+    msg = f"世界狀態（world_ned 座標，單位 m；n = 北、e = 東）：\n{json.dumps(state, ensure_ascii=False)}\n\n操作員指令：{cmd}"
+    if standing_order:
+        msg += f"\n操作員有效指令：{standing_order}"
+    return msg
 
 
 def _ex_state(drones, targets, prev=None):
@@ -126,11 +131,11 @@ FEW_SHOT = [
 ]
 
 
-def build_fleet_messages(state: dict, operator_command: Optional[str] = None) -> List[dict]:
+def build_fleet_messages(state: dict, operator_command: Optional[str] = None, standing_order: Optional[str] = None) -> List[dict]:
     """messages（不含 system；system 另外傳給 API）：few-shot 的 user/assistant 成對，加上本次請求。"""
     msgs = []
     for ex_state, ex_cmd, ex_plan in FEW_SHOT:
         msgs.append({"role": "user", "content": user_message(ex_state, ex_cmd)})
         msgs.append({"role": "assistant", "content": json.dumps(ex_plan, ensure_ascii=False)})
-    msgs.append({"role": "user", "content": user_message(state, operator_command)})
+    msgs.append({"role": "user", "content": user_message(state, operator_command, standing_order)})
     return msgs

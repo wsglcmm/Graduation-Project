@@ -275,3 +275,113 @@ def test_gemini_drops_unsupported_thinking_level():
     client.complete("s", [{"role": "user", "content": "hi"}])
     assert len(bodies) == 3  # 第一次 400 → 不帶 thinking 重送；之後記住，不再送 thinking
 
+
+# ---------- 操作員指令優先 ----------
+HOLD = {"mode": "hold", "target_id": None, "assignments": [{"drone_id": i, "role": "idle"} for i in IDS],
+        "formation": {"radius_m": 15.0}, "reason": "操作員要求懸停"}
+SEARCH = {"mode": "search", "target_id": None, "assignments": [{"drone_id": i, "role": "searcher"} for i in IDS],
+          "formation": {"radius_m": 20.0}, "reason": "操作員要求搜尋"}
+
+
+def _run(c, t_ns, targets=None):
+    """送出（若有觸發）→ 等背景完成 → 收結果。回傳收集到的事件。"""
+    targets = targets if targets is not None else [target()]
+    evs = c.tick(t_ns, DRONES, targets)
+    c.wait_idle()
+    return evs + c.tick(t_ns + 1, DRONES, targets)
+
+
+def test_operator_hold_pauses_agent_until_next_command():
+    llm = ScriptedClient([json.dumps(ENC), json.dumps(HOLD), json.dumps(ENC)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    _run(c, 0)
+    c.command("hold position")
+    ev = _run(c, 1 * S)
+    assert ev[-1].trigger == "operator" and c.current.mode == "hold" and c.paused
+    for k in range(2, 10):  # 定期觸發與目標事件都不再問 Agent
+        assert _run(c, k * S, [target(status="lost") if k % 2 else target()]) == []
+    assert len(llm.calls) == 2 and c.current.mode == "hold"
+    c.command("三架一起把那台車包圍起來")
+    ev = _run(c, 10 * S)
+    assert ev[-1].trigger == "operator" and c.current.mode == "encircle" and not c.paused
+    c.close()
+
+
+def test_search_directive_rejects_periodic_mode_change_and_tells_llm():
+    llm = ScriptedClient([json.dumps(SEARCH), json.dumps(ENC)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    c.command("search")
+    _run(c, 0)
+    first = c.current_id
+    ev = _run(c, 2 * S)
+    assert ev[-1].trigger == "periodic" and not ev[-1].valid and "違反操作員指令" in ev[-1].error
+    assert c.current_id == first and c.current.mode == "search"
+    assert "操作員有效指令" in llm.calls[1][-1]["content"] and "search" in llm.calls[1][-1]["content"]
+    assert "操作員有效指令" not in llm.calls[0][-1]["content"]  # 新指令本身不帶舊限制
+    c.close()
+
+
+def test_operator_command_is_retried_after_failure():
+    llm = ScriptedClient([RuntimeError("503 UNAVAILABLE"), json.dumps(HOLD)])
+    c = Commander(IDS, llm=llm, period_s=100.0, clock=FakeClock())
+    c.command("hold")
+    ev = _run(c, 0)
+    assert not ev[-1].valid and "自動重送 1/2" in ev[-1].error
+    ev = _run(c, 1 * S)
+    assert ev[-1].valid and ev[-1].trigger == "operator" and ev[-1].operator_command == "hold" and c.current.mode == "hold"
+    c.close()
+
+
+def test_operator_command_falls_back_to_rule_after_retries():
+    llm = ScriptedClient([RuntimeError("503")] * 3)
+    c = Commander(IDS, llm=llm, period_s=100.0, clock=FakeClock())
+    c.command("請返航")
+    evs = []
+    for k in range(3):
+        evs += _run(c, k * S)
+    assert [e.planner for e in evs] == ["llm", "llm", "llm", "rule"]
+    assert evs[-1].valid and c.current.mode == "return_home" and c.paused
+    c.close()
+
+
+def test_result_in_flight_is_superseded_by_new_operator_command():
+    llm = ScriptedClient([json.dumps(ENC), json.dumps(HOLD)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    c.tick(0, DRONES, [target()])  # 定期請求送出
+    c.command("hold")  # 結果回來前操作員下指令
+    c.wait_idle()
+    ev = c.tick(1, DRONES, [target()])
+    assert ev[0].plan_id is None and ev[0].valid and "取代" in ev[0].error and c.current is None
+    ev = _run(c, 2)
+    assert ev[-1].trigger == "operator" and c.current.mode == "hold"
+    c.close()
+
+
+def test_rule_commander_respects_directive():
+    c = Commander(IDS, llm=None, period_s=1.0, clock=FakeClock())
+    c.tick(0, DRONES, [target()])
+    c.command("先懸停")
+    c.tick(1 * S, DRONES, [target()])
+    assert c.paused and c.tick(5 * S, DRONES, [target()]) == []
+    c.command("搜尋")
+    c.tick(6 * S, DRONES, [target()])
+    assert c.current.mode == "search"
+    assert c.tick(8 * S, DRONES, [target()])[0].plan["mode"] == "search"  # 定期也維持搜尋
+
+
+def test_command_ignores_blank_input():
+    c = Commander(IDS, llm=None, period_s=100.0, clock=FakeClock())
+    c.tick(0, DRONES, [target()])
+    c.command("   ")
+    assert c.tick(1, DRONES, [target()]) == []
+
+
+def test_operator_encircle_without_visible_target_does_not_lock_search():
+    llm = ScriptedClient([json.dumps(SEARCH), json.dumps(ENC)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    c.command("三架一起把那台車包圍起來")
+    _run(c, 0, [])  # 還沒有目標 → 只能搜尋
+    assert c.current.mode == "search" and c.directive is None
+    ev = _run(c, 2 * S)  # 發現目標後可以自己切到包圍
+    assert ev[-1].valid and c.current.mode == "encircle"
+    c.close()
