@@ -108,3 +108,21 @@ def test_parse_scripted_rejects_bad_format():
 
     with pytest.raises(SystemExit):
         parse_scripted(["沒有等號"])
+
+
+def test_estimate_error_is_split_by_target_status():
+    """懸停後目標跑遠、判定遺失：遺失時段的誤差另外列，不拉高 estimate_rmse_m。"""
+    from demo.run import feed_scripted, parse_scripted
+
+    scripted = parse_scripted(["30=先懸停"])
+    c = Commander(IDS, llm=None, period_s=2.0)
+    eng = DemoEngine(CAM, ERR, c, rabbit=RabbitConfig(seed=0), seed=0)
+    for _ in range(900):  # 90 秒：前 30 秒正常追蹤，之後懸停讓目標跑掉
+        feed_scripted(eng, scripted)
+        eng.step()
+    m = eng.summary()
+    by = m["estimate_rmse_by_status_m"]
+    frac = m["target_status_fraction"]
+    assert set(by) == {"tracking", "predicted", "lost"} and abs(sum(frac.values()) - 1.0) < 1e-9
+    assert frac["lost"] > 0.1 and by["lost"] > 3 * by["tracking"]
+    assert m["estimate_rmse_m"] < by["lost"]

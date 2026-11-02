@@ -10,7 +10,7 @@
 """
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -25,13 +25,28 @@ DEFAULT_START = {"uav1": (-30.0, -20.0, 25.0), "uav2": (-30.0, 0.0, 30.0), "uav3
 S = 1_000_000_000
 
 
+TRACK_STATUSES = ("tracking", "predicted", "lost")
+
+
+def _rmse(sq: List[float]) -> Optional[float]:
+    return math.sqrt(float(np.mean(sq))) if sq else None
+
+
 @dataclass
 class Metrics:
-    """報告用的成功指標（規格「可量化的成功指標」）。"""
+    """報告用的成功指標（規格「可量化的成功指標」）。
+
+    估計誤差依目標狀態分開統計，因為三種狀態的意義不同：
+        tracking   至少一架看得到，誤差反映座標轉換 + 融合 + 濾波的品質
+        predicted  暫時看不到，用速度外推（< 3 s），誤差會隨時間變大
+        lost       超過 3 s 沒看到，位置只是最後估計，不能算成定位誤差
+    estimate_rmse_m 只算 tracking + predicted；lost 另外列出，避免懸停、返航時拉高數字。
+    """
 
     steps: int = 0
     visible_steps: int = 0
-    est_sq_err: List[float] = field(default_factory=list)
+    sq_err: Dict[str, List[float]] = field(default_factory=lambda: {s: [] for s in TRACK_STATUSES})
+    status_steps: Dict[str, int] = field(default_factory=lambda: {**{s: 0 for s in TRACK_STATUSES}, "none": 0})
     encircled_at_s: Optional[float] = None
     encircled_steps: int = 0
 
@@ -42,7 +57,9 @@ class Metrics:
         return {
             "duration_s": self.steps * 0.1,
             "visible_fraction": self.visible_steps / max(1, self.steps),
-            "estimate_rmse_m": math.sqrt(np.mean(self.est_sq_err)) if self.est_sq_err else None,
+            "estimate_rmse_m": _rmse(self.sq_err["tracking"] + self.sq_err["predicted"]),
+            "estimate_rmse_by_status_m": {s: _rmse(v) for s, v in self.sq_err.items()},
+            "target_status_fraction": {s: n / max(1, self.steps) for s, n in self.status_steps.items()},
             "time_to_encircle_s": self.encircled_at_s,
             "encircled_fraction": self.encircled_steps / max(1, self.steps),
             "plans": len(evs),
@@ -111,7 +128,11 @@ class DemoEngine:
             m.visible_steps += 1
         if self.target_state:
             p = self.target_state["position_world_ned_m"]
-            m.est_sq_err.append((p["n"] - self.truth[0]) ** 2 + (p["e"] - self.truth[1]) ** 2)
+            st = self.target_state["status"]
+            m.sq_err[st].append((p["n"] - self.truth[0]) ** 2 + (p["e"] - self.truth[1]) ** 2)
+            m.status_steps[st] += 1
+        else:
+            m.status_steps["none"] += 1
         plan = self.commander.current
         r = plan.formation.radius_m if plan else 15.0
         if is_encircled(self.sim.states(), *self.truth, r):
