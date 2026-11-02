@@ -243,3 +243,29 @@ def test_calibrate_cli_accepts_multiple_pose_only_sessions(tmp_path):
     report = json.loads((tmp_path / "cal" / "calibration.json").read_text(encoding="utf-8"))
     assert set(report["pose_per_session"]) == {"a", "b"} and "pixel_sigma_px" not in s
     assert any("pose-only" in w for w in warnings)
+
+
+def test_velocity_lead_compensation_recovers_injected_lead(tmp_path):
+    """A 查明的原因：EKF2_GPS_DELAY 讓位置超前；「位置 − 速度 × τ」不需真值就能補償。"""
+    from analysis.session import compensate_position_lead
+
+    d = generate(tmp_path / "s", CAM, NOISELESS)
+    _shift_positions(d, 80.0)
+    ses = load_session(d)
+    est = cal.estimate_position_lead(ses, stride=1, min_samples=50)
+    assert est["reliable"] and est["lead_s"] == pytest.approx(0.08, abs=0.01)
+    before = cal.pose_errors(ses)
+    assert compensate_position_lead(ses, est["lead_s"]) == len(ses.poses)
+    after = cal.pose_errors(ses)
+    assert after["n"]["rms"] < 0.3 * before["n"]["rms"] and after["e"]["rms"] < 0.3 * max(before["e"]["rms"], 0.05)
+    assert after["yaw"]["rms"] == pytest.approx(before["yaw"]["rms"])  # 姿態不受影響
+
+
+def test_velocity_lead_compensation_skips_poses_without_velocity(tmp_path):
+    from analysis.session import compensate_position_lead
+
+    d = generate(tmp_path / "s", CAM, dataclasses.replace(NOISELESS, duration_s=1.0))
+    ses = load_session(d)
+    assert all("velocity_ned_mps" not in p for p in ses.poses)  # 合成資料沒有速度
+    first = dict(ses.poses[0]["position_ned_m"])
+    assert compensate_position_lead(ses, 0.1) == 0 and ses.poses[0]["position_ned_m"] == first

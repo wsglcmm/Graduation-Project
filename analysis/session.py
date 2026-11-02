@@ -155,6 +155,29 @@ def load_session(path) -> Session:
     return Session(path, meta, poses, frames, truth)
 
 
+def compensate_position_lead(session: Session, lead_s: float) -> int:
+    """修正 PX4 EKF 的位置超前：position_ned_m −= velocity_ned_mps × lead_s（就地修改 session.poses）。
+
+    原因（A 於 2026-11-01 查明）：PX4 參數 EKF2_GPS_DELAY 預設 110 ms，但 Gazebo 的 GPS 沒有延遲，
+    EKF 多補償了不存在的延遲，位置因此比實際狀態超前；姿態只用 IMU，不受影響。
+    A 之後把參數設為 0，新錄的資料不需要補償；11/01 以前錄的資料實測最佳 lead_s ≈ 0.095 s。
+    沒有 velocity_ned_mps 的筆數不修改。回傳修改的筆數。
+    """
+    if lead_s == 0:
+        return 0
+    n = 0
+    out = []
+    for raw in session.poses:
+        v = raw.get("velocity_ned_mps")
+        if v is not None:
+            p = raw["position_ned_m"]
+            raw = dict(raw, position_ned_m={k: p[k] - v[k] * lead_s for k in ("n", "e", "d")})
+            n += 1
+        out.append(raw)
+    session.poses = out
+    return n
+
+
 def angle_diff(a: float, b: float) -> float:
     """a − b，包到 [-π, π)。"""
     return (a - b + math.pi) % (2 * math.pi) - math.pi

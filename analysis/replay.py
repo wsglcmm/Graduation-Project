@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from analysis.session import Session, load_session, write_jsonl
+from analysis.session import Session, compensate_position_lead, load_session, write_jsonl
 from coord_transform import TargetWorldPipeline
 from coord_transform.config import (
     CameraConfig,
@@ -236,11 +236,15 @@ def main(argv=None):
     ap.add_argument("--gate", type=float, default=DEFAULT_GATE_M, help="配對真值的最大距離 m")
     ap.add_argument("--out", help="輸出資料夾（預設 <session>/output）")
     ap.add_argument("--no-plots", action="store_true")
+    ap.add_argument("--position-lead-s", type=float, default=0.0,
+                    help="先做「位置 − 速度 × τ」補償（PX4 EKF2_GPS_DELAY 造成的位置超前；11/01 以前的資料約 0.095）")
     args = ap.parse_args(argv)
 
     session = load_session(args.session)
     if not session.has_detections:
         raise SystemExit(f"{session.path} 沒有 detections.jsonl：重播需要 B 的偵測結果。只有姿態時請用 python -m analysis.calibrate_error_model")
+    if args.position_lead_s:
+        compensate_position_lead(session, args.position_lead_s)
     cam = load_camera_config(args.camera)
     pipe_cfg = load_pipeline_config(args.pipeline)
     if args.reference:

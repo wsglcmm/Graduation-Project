@@ -15,6 +15,8 @@
       2026-11-01 A 的資料：roll/pitch 與 Gazebo 同步（最佳 0 ms），位置卻約 −90 ms，
       代表同一筆 Pose 的位置和姿態不是同一時刻（或位置有和速度成正比的偏差），所以只回報、不自動套用；
       --position-lag-ms 只修正位置比對，不動姿態。
+      原因已由 A 查明：EKF2_GPS_DELAY 預設 110 ms，但 Gazebo GPS 沒有延遲。不需要真值的補償式是
+      「位置 − 速度 × τ」（--position-lead-s，11/01 以前的資料最佳 τ ≈ 0.095 s；A 已把參數設 0）。
 
 沒有 detections.jsonl（B 還沒跑偵測）時只做姿態標定（pose-only），像素 σ 沿用原設定。
 
@@ -28,7 +30,7 @@ from pathlib import Path
 
 import numpy as np
 
-from analysis.session import angle_diff, load_session
+from analysis.session import angle_diff, compensate_position_lead, load_session
 from coord_transform import ned_to_pixel, rotations
 from coord_transform.config import load_camera_config, load_pipeline_config
 from coord_transform.messages import DetectionFrame, PoseMessage
@@ -89,6 +91,33 @@ def _moving_position_rmse(session, lag_ns: int, min_speed: float, stride: int) -
         p = raw["position_ned_m"]
         sq.append((p["n"] - truth.n) ** 2 + (p["e"] - truth.e) ** 2)
     return (math.sqrt(sum(sq) / len(sq)) if sq else float("nan")), len(sq)
+
+
+def estimate_position_lead(session, max_s: float = 0.2, step_s: float = 0.005, min_speed: float = 0.5, stride: int = 2,
+                           min_samples: int = 200) -> dict:
+    """估計「位置 − 速度 × τ」補償的最佳 τ（秒），用移動中的水平位置誤差 RMS 網格搜尋。
+
+    和 estimate_position_lag（把真值時間平移）不同，這個補償式不需要真值，可以直接用在重播與即時流程。
+    """
+    samples = []
+    for raw in session.poses[::stride]:
+        v = raw.get("velocity_ned_mps")
+        if not v or math.hypot(v["n"], v["e"]) <= min_speed:
+            continue
+        truth = session.drone_pose_ned(raw["timestamp_ns"])
+        if truth is not None:
+            p = raw["position_ned_m"]
+            samples.append((p["n"] - truth.n, p["e"] - truth.e, v["n"], v["e"]))
+    if len(samples) < min_samples:
+        return {"lead_s": 0.0, "reliable": False, "n": len(samples), "note": "移動中的樣本太少（需要跟車或直線飛行的紀錄）"}
+    a = np.array(samples)
+    def rmse(tau):
+        return float(np.sqrt(np.mean((a[:, 0] - a[:, 2] * tau) ** 2 + (a[:, 1] - a[:, 3] * tau) ** 2)))
+    taus = np.arange(0.0, max_s + 1e-9, step_s)
+    errs = [rmse(t) for t in taus]
+    k = int(np.argmin(errs))
+    return {"lead_s": float(taus[k]), "reliable": bool(errs[k] < 0.8 * errs[0]), "n": len(samples),
+            "rmse_zero_m": errs[0], "rmse_best_m": errs[k]}
 
 
 def estimate_position_lag(session, max_ms: float = 300.0, min_speed: float = 0.5, stride: int = 2, min_samples: int = 200) -> dict:
@@ -158,7 +187,8 @@ def suggest(pose_err, pix_err):
     if abs(yb) > max(math.radians(1.0), 2 * ys):
         suggestion["yaw_sigma_deg_rms"] = math.degrees(pose_err["yaw"]["rms"])
         warnings.append(
-            f"yaw 有系統性偏差 {math.degrees(yb):+.1f}°（標準差只有 {math.degrees(ys):.2f}°）：多半是 EKF 航向尚未對準。"
+            f"yaw 有系統性偏差 {math.degrees(yb):+.1f}°（標準差只有 {math.degrees(ys):.2f}°）：多半是 PX4 的磁偏角和模擬磁場不一致"
+            "（EKF2_DECL_TYPE / EKF2_MAG_DECL），要水平加速後 EKF 才會修正。"
             f"偏差沒修正前，yaw_sigma_deg 建議用 RMS {math.degrees(pose_err['yaw']['rms']):.2f}°，否則 uncertainty_m 會低估"
         )
     if pix_err:
@@ -220,6 +250,8 @@ def main(argv=None):
     ap.add_argument("--time-offset-ms", type=float, help="影像時間偏移（預設讀 pipeline.yaml）")
     ap.add_argument("--estimate-position-lag", action="store_true", help="估計位置相對時間戳的偏移（只回報，不套用）")
     ap.add_argument("--position-lag-ms", type=float, default=0.0, help="比對位置時套用的偏移（只影響位置，不影響姿態）")
+    ap.add_argument("--position-lead-s", type=float, default=0.0,
+                    help="先做「位置 − 速度 × τ」補償（PX4 EKF2_GPS_DELAY 造成的位置超前；11/01 以前的資料約 0.095）")
     ap.add_argument("--out", help="輸出資料夾（預設 <第一個 session>/output）")
     args = ap.parse_args(argv)
 
@@ -228,6 +260,10 @@ def main(argv=None):
     reference = args.reference or pipe.reference_point
     offset_ns = int(round(args.time_offset_ms * 1e6)) if args.time_offset_ms is not None else pipe.frame_time_offset_ns
     sessions = [load_session(p) for p in args.sessions]
+    if args.position_lead_s:
+        for ses in sessions:
+            compensate_position_lead(ses, args.position_lead_s)
+        print(f"已套用位置超前補償：位置 − 速度 × {args.position_lead_s:.3f} s")
 
     # 1) 位置的時間偏移：只有移動中的 session 估得出來；只回報，要套用請明確給 --position-lag-ms
     lags = {}
@@ -237,6 +273,9 @@ def main(argv=None):
             tag = "可靠" if est["reliable"] else "不可靠"
             print(f"位置時間偏移（{ses.path.name}）：{est['lag_ms']:+.0f} ms（{tag}，移動樣本 {est['n']}，"
                   f"移動中水平 RMS {est['rmse_zero_m']:.3f} → {est['rmse_best_m']:.3f} m）")
+            lead = est["velocity_lead"] = estimate_position_lead(ses)
+            if lead["reliable"]:
+                print(f"  └ 等效的「位置 − 速度 × τ」補償：τ = {lead['lead_s']:.3f} s（水平 RMS {lead['rmse_zero_m']:.3f} → {lead['rmse_best_m']:.3f} m）")
     lag_ms = args.position_lag_ms
     lag_ns = int(round(lag_ms * 1e6))
 
@@ -278,7 +317,8 @@ def main(argv=None):
     src = ", ".join(ses.path.name for ses in sessions)
     text = to_yaml(suggestion, src, reference)
     (out_dir / "error_model_suggested.yaml").write_text(text, encoding="utf-8")
-    report = {"sessions": [str(ses.path) for ses in sessions], "position_lag_ms_applied": lag_ms, "position_lag_estimates": lags,
+    report = {"sessions": [str(ses.path) for ses in sessions], "position_lead_s_applied": args.position_lead_s,
+              "position_lag_ms_applied": lag_ms, "position_lag_estimates": lags,
               "pose": pose_err, "pose_per_session": per_session, "pixel": pix_err, "suggestion": suggestion,
               "warnings": warnings, "reference": reference}
     (out_dir / "calibration.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
