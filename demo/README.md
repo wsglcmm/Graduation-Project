@@ -52,6 +52,28 @@ python -m demo.run --planner llm --headless --duration 90
 
 輸出位置是 `output/demo/<時間>/`，裡面有 `metrics.json`（包圍完成時間、視野內比例、估計誤差、LLM 合法率與延遲、最小機間距離）和 `events.jsonl`（每一筆 Agent 事件）。`output/` 已在 `.gitignore`。
 
+估計誤差依目標狀態分開統計：`estimate_rmse_m` 只算「追蹤中 + 外推中」；`estimate_rmse_by_status_m` 列出三種狀態各自的 RMSE，`target_status_fraction` 是各狀態的時間比例。懸停、返航時目標跑遠被判定遺失，遺失時段的誤差不會再拉高主指標。
+
+### 固定劇本比較（報告用）
+
+同一個劇本、同一組 seed，規則式與 LLM 才能公平比較。劇本定義在 `demo/scenarios.py`：
+
+| 劇本 | 內容 |
+|---|---|
+| `autonomous` | 沒有操作員指令，Agent 自己搜尋、追蹤、包圍（90 s） |
+| `command_encircle` | 第 10 秒下令包圍（90 s） |
+| `hold_resume` | 15 s 包圍 → 40 s 懸停 → 60 s 恢復包圍（100 s） |
+| `return_home` | 15 s 包圍 → 50 s 返航（75 s） |
+
+```powershell
+python -m demo.benchmark
+python -m demo.benchmark --planner llm --period 5
+```
+
+規則式是快轉執行，全部劇本 × 3 個 seed 約 10 秒；LLM 照真實時間跑，約 18 分鐘（會用到約 200 次 API 請求，注意免費層額度）。輸出在 `output/benchmark/<時間>_<規劃者>/`：`summary.md`（平均 ± 標準差，可直接貼進報告）、`runs.csv`（每次執行一列，Excel 可直接開）與每次執行的 `metrics.json`、`events.jsonl`。
+
+除了上面的指標，還會計算：計畫合法率與延遲（不分規劃者）、操作員指令回應時間、懸停後恢復到重新包圍的時間，以及「懸停／返航期間 Agent 自己產生的計畫數」（應為 0）。
+
 ## 架構（對應規格 §10）
 
 ```

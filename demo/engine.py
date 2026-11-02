@@ -49,6 +49,8 @@ class Metrics:
     status_steps: Dict[str, int] = field(default_factory=lambda: {**{s: 0 for s in TRACK_STATUSES}, "none": 0})
     encircled_at_s: Optional[float] = None
     encircled_steps: int = 0
+    encircle_onsets_s: List[float] = field(default_factory=list)  # 每次從「沒包圍」變成「包圍」的時間
+    _was_encircled: bool = False
 
     def summary(self, commander: Commander, sim: FleetSim) -> dict:
         evs = commander.events
@@ -62,6 +64,7 @@ class Metrics:
             "target_status_fraction": {s: n / max(1, self.steps) for s, n in self.status_steps.items()},
             "time_to_encircle_s": self.encircled_at_s,
             "encircled_fraction": self.encircled_steps / max(1, self.steps),
+            "encircle_onsets_s": list(self.encircle_onsets_s),
             "plans": len(evs),
             "llm_requests": len(llm_evs),
             "llm_valid_rate": (sum(e.valid for e in llm_evs) / len(llm_evs)) if llm_evs else None,
@@ -135,10 +138,14 @@ class DemoEngine:
             m.status_steps["none"] += 1
         plan = self.commander.current
         r = plan.formation.radius_m if plan else 15.0
-        if is_encircled(self.sim.states(), *self.truth, r):
+        now = is_encircled(self.sim.states(), *self.truth, r)
+        if now:
             m.encircled_steps += 1
             if m.encircled_at_s is None:
                 m.encircled_at_s = self.t_ns / S
+            if not m._was_encircled:
+                m.encircle_onsets_s.append(self.t_ns / S)
+        m._was_encircled = now
 
     def summary(self) -> dict:
         return self.metrics.summary(self.commander, self.sim)
