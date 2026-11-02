@@ -195,6 +195,22 @@ python -m analysis.calibrate_error_model <5 個 session> --position-lead-s 0.095
 
 最佳值比參數的 110 ms 小，推測是 EKF 對 GPS 只部分採信（與 IMU 加權融合）。11/01 以前的資料用 0.095 s。因為姿態同步、影像也是 Gazebo 時間，`pipeline.yaml` 的 `frame_time_offset_ms` 維持 0。
 
+### 3.2 A 重錄的資料（2026-11-02）
+
+A 依 C 的回饋重錄 5 段：`EKF2_GPS_DELAY = 0`、車輛與地面材質修正（藍車、紅車、柏油地面），每段開頭先在地面靜止（verify 30 s，其他 10 s）。這批取代 11/01 的 hover／follow。
+
+| Session | yaw 偏差（平均） | yaw σ | 水平位置 RMS（n / e） | 位置時間差 |
+|---|---|---|---|---|
+| verify20m（地面 30 s → 懸停 30 s → 直線 15 s） | +4.03° | 1.95° | 0.018 / 0.040 m | +20 ms（移動中 RMS 0.074 → 0.053 m） |
+| hover20m | +4.90° | 0.35° | 0.030 / 0.017 m | — |
+| hover30m | +3.99° | 0.64° | 0.020 / 0.020 m | — |
+| hover50m | +4.27° | 0.37° | 0.025 / 0.018 m | — |
+| follow20m | +2.70° | 2.48° | 0.020 / 0.082 m | +10 ms（補償後幾乎無改善） |
+
+- **位置超前已消失**：舊資料約 −90 ms，新資料只剩 +10 ~ +20 ms，和 A 自己量的 −0.018 / +0.007 s 一致。新資料不需要 `--position-lead-s`。
+- **yaw 偏差仍在**（地面 +5.0 ~ +5.5°），A 還在選修正方式。C 原本建議的 `EKF2_DECL_TYPE = 0`、`EKF2_MAG_DECL = −2.56` 經 A 在 PX4 v1.17 實測不可行（bit1 沒開時 EKF 用 0° 磁偏角、開了又被 WMM 覆蓋，偏差約 +2.6°）；C 當初依據的是舊版 PX4 原始碼的參數說明。
+- `error_model.yaml` 依這批資料更新：roll/pitch 0.1°、yaw 4.3°（RMS）、高度 0.05 m、水平位置 0.1 m。
+
 ## 4. 結論與對規格的建議（v0.1.1 提案，需開 PR）
 
 1. **§2.4 參考點**：改為 `center_half_height`。✅ 已提出規格 v0.2.2（PR #6），C 的程式預設值與 `config/pipeline.yaml` 已切換；`bottom_center` 仍可在 `pipeline.yaml` 指定。影片 homography 只對應地面平面，維持底邊中點。
