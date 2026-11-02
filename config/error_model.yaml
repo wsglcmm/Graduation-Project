@@ -1,7 +1,7 @@
 # 誤差模型：各輸入誤差的 1σ，用來計算 TargetWorld 的 uncertainty_m
 #
 # 2026-11-01 用 A 的 5 段 Gazebo 紀錄（hover 20/30/50 m、follow 20 m、yawcheck 20 m，約 2.9 萬筆姿態）標定：
-#   python -m analysis.calibrate_error_model <5 個 session> --estimate-position-lag
+#   python -m analysis.calibrate_error_model <5 個 session> --position-lead-s 0.095
 # 這批資料沒有 detections.jsonl（pose-only），所以 pixel_sigma_px 仍是假設值。
 # 選值原則：用「追蹤飛行時」的情況（跟車段），而不是最安靜的懸停段，避免 uncertainty_m 低估。
 
@@ -9,11 +9,13 @@ pixel_sigma_px: 2.0         # ASSUMED：待 B 對 A 的 frames/ 跑完偵測後�
 
 roll_pitch_sigma_deg: 0.2   # 實測：懸停 0.01°；跟車轉彎 roll 0.13°、pitch 0.25°（取跟車段）
 
-yaw_sigma_deg: 4.1          # 實測 RMS（偏差 +3.7° 加抖動 1.6°）。PX4 EKF 航向從開機就偏約 +4.4°，
-                            # 起飛、懸停、原地轉一圈都不會修正，要水平直線飛約 15 s 才收斂到 0。
-                            # 偏差是系統性的，只填標準差（1.6°）會低估；源頭修好（或起飛後先直線飛對準）再改回約 1.0
+yaw_sigma_deg: 4.1          # 實測 RMS（偏差 +3.7° 加抖動 1.6°）。原因（A 查明）：PX4 用地磁模型的磁偏角 +3.41°，
+                            # Gazebo 磁場是 −2.56°（固定差 6.0°），再加上磁力計自動校正累積的偏移（約 +1.1°，每次飛完會變）。
+                            # 起飛、懸停、原地旋轉都不會修正，要水平直線飛約 15 s 才收斂。
+                            # 偏差是系統性的，只填標準差（1.6°）會低估；A 改 EKF2_DECL_TYPE / EKF2_MAG_DECL 並錄驗證資料後再下修
 
-altitude_sigma_m: 0.06      # 實測：0.056 m
+altitude_sigma_m: 0.06      # 實測：0.049–0.056 m
 
-horizontal_position_sigma_m: 0.2  # 實測：懸停約 0.015 m；移動中約 0.19 m（各軸）。
-                                  # 移動時位置比 Gazebo 真值領先約 90 ms（姿態則同步），速度 2.5 m/s 時約 0.23 m，待 A 確認原因
+horizontal_position_sigma_m: 0.1  # 實測（已做位置超前補償）：懸停約 0.015 m；跟車約 0.03 / 0.06 m（n / e），取 0.1 保守。
+                                  # 位置超前原因（A 查明）：EKF2_GPS_DELAY 預設 110 ms，但 Gazebo GPS 沒有延遲。
+                                  # A 已把參數設 0；11/01 以前的資料重播時加 --position-lead-s 0.095（位置 − 速度 × 0.095 s）

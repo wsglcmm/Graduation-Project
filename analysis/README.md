@@ -155,7 +155,8 @@ A、B 錄製 session（格式：analysis/log_format.md）
 A 錄了 5 段（hover 20/30/50 m、follow 20 m 跟車 S 形、yawcheck 20 m），約 2.9 萬筆姿態對上 Gazebo 真值。B 還沒跑偵測，所以只標定姿態與位置：
 
 ```
-python -m analysis.calibrate_error_model <5 個 session> --estimate-position-lag
+python -m analysis.calibrate_error_model <5 個 session> --estimate-position-lag   # 估計位置超前
+python -m analysis.calibrate_error_model <5 個 session> --position-lead-s 0.095   # 補償後標定
 ```
 
 | 項目 | 懸停（3 段） | 跟車 | yawcheck | 填入 error_model.yaml |
@@ -164,7 +165,8 @@ python -m analysis.calibrate_error_model <5 個 session> --estimate-position-lag
 | **yaw 偏差** | **+4.3 ~ +4.5°** | +0.9° | +3.9° | — |
 | yaw σ / RMS | 0.05–0.14° / 4.4° | 1.4° / 1.7° | 1.6° / 4.2° | **4.1°（RMS）** |
 | 高度 σ | 0.01–0.02 m | 0.02 m | 0.06 m | 0.06 m |
-| 水平位置 σ（各軸） | 0.01–0.02 m | **0.19 m** | 0.02–0.07 m | 0.2 m |
+| 水平位置 σ（各軸，未補償） | 0.01–0.02 m | 0.19 m | 0.02–0.07 m | — |
+| 水平位置 σ（n / e，補償後） | 0.01–0.02 m | **0.03 / 0.06 m** | 0.02 m | 0.1 m |
 
 **發現 1：yaw 的系統性偏差才是主要誤差。** yawcheck 依飛行階段拆開（已扣除下面的位置時間偏移，不影響 yaw）：
 
@@ -176,10 +178,22 @@ python -m analysis.calibrate_error_model <5 個 session> --estimate-position-lag
 | 直線前飛 2 m/s、15 s | 從 +4.0° 收斂到 +1.7° |
 | 之後懸停 | **+0.1°** |
 
-偏差從開機就存在，旋轉也修不掉，只有水平加速（GNSS 速度讓航向變得可觀測）才會收斂。推測是 PX4 EKF2 的初始航向（磁力計與磁偏角設定）和 Gazebo 世界座標不一致，**待 A 確認**。影響：30 m 高度、畫面邊緣（離中心約 36 m）的目標，4.4° 會造成約 2.7 m 的橫向誤差，遠大於其他項目。
+偏差從開機就存在，旋轉也修不掉，只有水平加速（GNSS 速度讓航向變得可觀測）才會收斂。
+**原因（A 於 11/01 查明）**：地面 yaw 誤差 = PX4 用的磁偏角（地磁模型 +3.41°）− 模擬磁力計實際量到的磁偏角；後者是 Gazebo 磁場本身的 −2.56°（固定差 6.0°），再加上 PX4 磁力計自動校正累積的偏移（目前約 +1.1°，每次飛完都可能變，所以 A 量到 4.4～7.2°）。A 用這個式子預測三種設定的地面偏差都對得上。
+建議的修正方式：`EKF2_DECL_TYPE = 0`、`EKF2_MAG_DECL` 設為 Gazebo 的磁偏角，再關掉自動校正，讓偏差接近 0（比固定在 +6.0° 再由 C 扣除乾淨）。改完需要錄一段短的 yawcheck 驗證。影響：30 m 高度、畫面邊緣（離中心約 36 m）的目標，4.4° 會造成約 2.7 m 的橫向誤差，遠大於其他項目。
 短期作法：起飛後先直線飛約 15 s 讓航向對準；修正前 `yaw_sigma_deg` 用 RMS（4.1°），否則 `uncertainty_m` 會低估。
 
-**發現 2：移動時位置領先真值約 90 ms，姿態卻是同步的。** 用移動中的水平位置誤差網格搜尋，三個獨立估計（follow 水平 −90 ms、yawcheck 水平 −96 ms、yawcheck 爬升的垂直 −84 ms）一致；但 roll/pitch 在 0 ms 最準，套用 −90 ms 反而變差。所以這不是時鐘偏移，而是同一筆 Pose 裡位置和姿態不在同一時刻（或位置有和速度成正比的偏差），違反規格 §4「位置須為同一時刻」，**待 A 確認**（例如位置與姿態是否來自不同 topic）。因為姿態同步、影像也是 Gazebo 時間，`pipeline.yaml` 的 `frame_time_offset_ms` 維持 0。
+**發現 2：移動時位置領先真值約 90 ms，姿態卻是同步的。** 用移動中的水平位置誤差網格搜尋，三個獨立估計（follow 水平 −90 ms、yawcheck 水平 −96 ms、yawcheck 爬升的垂直 −84 ms）一致；但 roll/pitch 在 0 ms 最準，套用 −90 ms 反而變差。所以這不是時鐘偏移，而是位置有和速度成正比的偏差。
+**原因（A 於 11/01 查明）**：PX4 參數 `EKF2_GPS_DELAY` 預設 110 ms，但 Gazebo 的 GPS 沒有延遲，EKF 多補償了不存在的延遲，位置被往前推（A 量到 0.115 s）；姿態只用 IMU，所以同步。位置和姿態來自同一筆 ODOMETRY。A 把參數設 0 後超前降到 0.005 s。
+**補償舊資料**：不需要真值的補償式是「位置 − 速度 × τ」（`--position-lead-s`）：
+
+| τ | follow20m 水平 RMS | yawcheck20m 水平 RMS |
+|---|---|---|
+| 0（不補償） | 0.276 m | 0.193 m |
+| 0.090–0.095 s（最佳） | **0.112 m** | **0.036 m** |
+| 0.11 s（參數值） | 0.124 m | 0.046 m |
+
+最佳值比參數的 110 ms 小，推測是 EKF 對 GPS 只部分採信（與 IMU 加權融合）。11/01 以前的資料用 0.095 s。因為姿態同步、影像也是 Gazebo 時間，`pipeline.yaml` 的 `frame_time_offset_ms` 維持 0。
 
 ## 4. 結論與對規格的建議（v0.1.1 提案，需開 PR）
 
