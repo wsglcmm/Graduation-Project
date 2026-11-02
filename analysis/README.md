@@ -197,7 +197,7 @@ python -m analysis.calibrate_error_model <5 個 session> --position-lead-s 0.095
 
 ## 4. 結論與對規格的建議（v0.1.1 提案，需開 PR）
 
-1. **§2.4 參考點**：改為 `center_half_height`。這屬於 C 內部的選擇，不影響 B 的輸出格式，但規格有記載這個參考點，所以仍要更新。程式目前預設照規格，用 `frame_to_target_world(..., reference="bottom_center")`；規格合併後再切換預設值。
+1. **§2.4 參考點**：改為 `center_half_height`。✅ 已提出規格 v0.2.2（PR #6），C 的程式預設值與 `config/pipeline.yaml` 已切換；`bottom_center` 仍可在 `pipeline.yaml` 指定。影片 homography 只對應地面平面，維持底邊中點。
 2. **§5 `uncertainty_m` 的精確定義**：DRMS = sqrt(σ_n² + σ_e²)，只涵蓋隨機誤差，不含系統偏差。
 3. **§2.3 時間同步**：實驗 3 量化了不同步的代價。A 已確認相機與姿態都使用 Gazebo 模擬時間；姿態實測 20 Hz，靠排隊與內插處理。
 4. **建議飛行條件**：高度 20–30 m，並讓目標盡量位於畫面中央。

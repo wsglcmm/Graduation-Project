@@ -1,9 +1,9 @@
 # 即時流程設定（coord_transform/pipeline.py 的 TargetWorldPipeline.from_config 讀取）
 
-# bbox 參考點：bottom_center（規格 §2.4 現行）/ center / center_half_height
-# 誤差研究建議 nadir 相機改用 center_half_height（見 analysis/README.md 實驗 5），
-# 但這是規格記載的行為，改之前先更新規格並開 PR。
-reference_point: bottom_center
+# bbox 參考點：center_half_height（規格 §2.4 v0.2.2）/ bottom_center / center
+# center_half_height：bbox 中心與物體半高平面求交，再投影回地面。nadir 看車時誤差從底邊中點的
+# 最多 3.4 m 降到 0.1 m 以下（analysis/README.md 實驗 5）。只用於相機模型流程；影片 homography 用底邊中點。
+reference_point: center_half_height
 
 # 影像時間戳要加多少 ms 才等於姿態時鐘的同一時刻。
 # 0：規格 v0.1.2 §2.3 確認「差 24 ms」是舊 20 Hz 姿態的取樣錯開，不是固定偏移；

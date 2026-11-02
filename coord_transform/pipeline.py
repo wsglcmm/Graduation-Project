@@ -16,6 +16,7 @@ from .messages import DetectionFrame
 from .pose_buffer import PoseBuffer
 from .target_world import frame_to_target_world
 from .uncertainty import ErrorModel
+from .reference_point import DEFAULT_REFERENCE
 
 DEFAULT_MAX_PENDING = 10  # 30 Hz 影像下約 330 ms
 
@@ -26,7 +27,7 @@ class TargetWorldPipeline:
         cfg: CameraConfig,
         err: Optional[ErrorModel] = None,
         *,
-        reference: str = "bottom_center",
+        reference: str = DEFAULT_REFERENCE,
         poses: Optional[PoseBuffer] = None,
         max_pending: int = DEFAULT_MAX_PENDING,
         frame_time_offset_ns: int = 0,

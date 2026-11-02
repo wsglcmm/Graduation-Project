@@ -8,7 +8,7 @@ from .config import CameraConfig
 from .messages import SCHEMA_VERSION, DetectionFrame
 from .pixel_to_ned import CameraMount, Status, pixel_to_ned
 from .pose_buffer import PoseBuffer
-from .reference_point import reference_point
+from .reference_point import DEFAULT_REFERENCE, reference_point
 from .uncertainty import ErrorModel, horizontal_sigma_m
 
 
@@ -18,14 +18,14 @@ def frame_to_target_world(
     cfg: CameraConfig,
     err: Optional[ErrorModel] = None,
     *,
-    reference: str = "bottom_center",
+    reference: str = DEFAULT_REFERENCE,
     pose_time_ns: Optional[int] = None,
 ) -> dict:
     """把一幀偵測轉成規格 §5 的 TargetWorld dict（可直接 json.dumps）。
 
     frame：DetectionFrame 或規格 §3 的 dict。
     err：誤差模型；None 時 uncertainty_m 一律為 null。
-    reference：bbox 參考點方法，見 reference_point.py。預設照規格 §2.4 用底邊中點。
+    reference：bbox 參考點方法，見 reference_point.py。預設照規格 §2.4（v0.2.2）用中心 + 半高平面。
     pose_time_ns：查姿態用的時間；None = 影像時間戳。影像與姿態時鐘有固定偏移時由 pipeline 傳入校正後的時間，
         輸出的 timestamp_ns 仍是原本的影像時間戳（規格 §5）。
     影像解析度與 camera.yaml 不符時直接報錯：內參是依解析度算的，對不上代表設定錯了，硬算只會得到錯的座標。

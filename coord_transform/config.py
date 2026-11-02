@@ -107,7 +107,7 @@ def load_error_model(path) -> ErrorModel:
 class PipelineConfig:
     """config/pipeline.yaml：即時流程的行為設定（不是相機參數）。"""
 
-    reference_point: str = "bottom_center"
+    reference_point: str = "center_half_height"  # 規格 §2.4（v0.2.2）
     frame_time_offset_ns: int = 0
     max_pending_frames: int = 10
     pose_max_gap_ns: int = 150_000_000

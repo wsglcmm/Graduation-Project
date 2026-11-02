@@ -88,7 +88,7 @@ def test_repo_pipeline_yaml_loads_with_spec_defaults():
     from coord_transform.config import load_pipeline_config
 
     cfg = load_pipeline_config(REPO_YAML.parent / "pipeline.yaml")
-    assert cfg.reference_point == "bottom_center"  # 規格 §2.4 未改之前維持
+    assert cfg.reference_point == "center_half_height"  # 規格 §2.4 v0.2.2
     assert cfg.frame_time_offset_ns == 0
     assert cfg.pose_max_gap_ns == 150_000_000 and cfg.pose_horizon_ns == 2_000_000_000
 

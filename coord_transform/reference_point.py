@@ -3,7 +3,7 @@
 為什麼重要：bbox 框住的是「有高度的物體」，不是地上的一個點。選錯參考點造成的是系統偏差，
 不會因為多平均幾幀而消失。analysis/error_study.py 的實驗 5 量化了三種方法：
 
-    bottom_center        底邊中點，與地面 d = 0 求交（規格 §2.4 目前的做法）
+    bottom_center        底邊中點，與地面 d = 0 求交（規格 v0.2.2 以前的做法；影片 homography 仍用它）
                          適合斜視相機看站立的人（腳 ≈ 底邊）；nadir 看車會偏 1–3 m
     center               bbox 中心，與地面求交；物體頂部離相機較近，中心射線會打到物體後方
     center_half_height   bbox 中心，與「物體半高」平面求交，再垂直投影回地面
@@ -13,6 +13,7 @@
 from typing import Optional, Tuple
 
 REFERENCE_METHODS = ("bottom_center", "center", "center_half_height")
+DEFAULT_REFERENCE = "center_half_height"  # 規格 §2.4（v0.2.2）：相機模型流程的預設參考點
 
 # ASSUMED：各類別典型高度（m），只含物體本身（COCO 的 bicycle/motorcycle 不含騎士，騎士另被偵測為 person）。
 # 誤差敏感度：高度先驗差 Δh，水平誤差約 (Δh/2)·tan(離軸角)，見 analysis/README.md。
@@ -29,7 +30,7 @@ CLASS_HEIGHT_M = {
 def reference_point(
     bbox: Tuple[float, float, float, float],
     cls: str,
-    method: str = "bottom_center",
+    method: str = DEFAULT_REFERENCE,
     *,
     ground_d_m: float = 0.0,
     height_m: Optional[float] = None,

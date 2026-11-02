@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from coord_transform import CameraIntrinsics, CameraMount, ErrorModel, Pose, PoseBuffer, frame_to_target_world, ned_to_pixel
 from coord_transform import rotations
 from coord_transform.config import CameraConfig
+from coord_transform.reference_point import CLASS_HEIGHT_M
 
 MS = 1_000_000
 T0 = 1_730_000_000_000_000_000
@@ -53,8 +54,10 @@ def frame(t_ns, dets, w=1280, h=720):
 
 
 def det_at(point, t_ns, mount=CFG.mount, track_id=7, cls="car"):
-    u, v = ned_to_pixel(point, INTR, mount, true_pose(t_ns))
-    return {"track_id": track_id, "class": cls, "confidence": 0.9, "bbox": {"x1": u - 20, "y1": v - 30, "x2": u + 20, "y2": v}}
+    """bbox 中心 = 物體半高點的投影（規格 §2.4 v0.2.2 預設的參考點），所以預設設定應該還原出接地點 point。"""
+    n, e, d = point
+    u, v = ned_to_pixel((n, e, d - CLASS_HEIGHT_M[cls] / 2), INTR, mount, true_pose(t_ns))
+    return {"track_id": track_id, "class": cls, "confidence": 0.9, "bbox": {"x1": u - 20, "y1": v - 15, "x2": u + 20, "y2": v + 15}}
 
 
 def test_target_recovered_between_pose_samples():
@@ -147,3 +150,16 @@ def test_resolution_mismatch_is_an_error():
 def test_invalid_detection_rejected(bad_det):
     with pytest.raises(ValidationError):
         frame_to_target_world(frame(T0, [bad_det]), stream(), CFG)
+
+
+def test_default_reference_is_center_half_height_and_bottom_center_still_selectable():
+    """規格 §2.4 v0.2.2：預設改為中心 + 半高平面；同一個框改用底邊中點會產生系統偏差。"""
+    from coord_transform.config import PipelineConfig
+    from coord_transform.reference_point import DEFAULT_REFERENCE
+
+    assert DEFAULT_REFERENCE == PipelineConfig().reference_point == "center_half_height"
+    t = T0 + 510 * MS
+    default = frame_to_target_world(frame(t, [det_at(CAR, t)]), stream(), CFG)["targets"][0]["position_ned_m"]
+    old = frame_to_target_world(frame(t, [det_at(CAR, t)]), stream(), CFG, reference="bottom_center")["targets"][0]["position_ned_m"]
+    err = lambda p: ((p["n"] - CAR[0]) ** 2 + (p["e"] - CAR[1]) ** 2) ** 0.5
+    assert err(default) < 0.01 and err(old) > 0.1

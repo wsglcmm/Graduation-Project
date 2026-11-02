@@ -7,6 +7,7 @@ from coord_transform import CameraIntrinsics, CameraMount, TargetWorldPipeline, 
 from coord_transform.config import CameraConfig
 
 from test_target_world import T0, MS, true_pose
+from coord_transform.reference_point import CLASS_HEIGHT_M
 
 INTR = CameraIntrinsics.from_hfov(1280, 960, 1.74)  # A 回覆的 Gazebo 相機
 CFG = CameraConfig(INTR, CameraMount(pitch_rad=-math.pi / 2), 0.0, 1000.0)
@@ -24,8 +25,9 @@ def pose_msg(t_ns):
 
 
 def frame_msg(t_ns, frame_id):
-    u, v = ned_to_pixel(CAR, INTR, CFG.mount, true_pose(t_ns))
-    det = {"track_id": 7, "class": "car", "confidence": 0.9, "bbox": {"x1": u - 20, "y1": v - 30, "x2": u + 20, "y2": v}}
+    # bbox 中心 = 車半高點的投影（規格 §2.4 v0.2.2 預設的參考點）
+    u, v = ned_to_pixel((CAR[0], CAR[1], CAR[2] - CLASS_HEIGHT_M["car"] / 2), INTR, CFG.mount, true_pose(t_ns))
+    det = {"track_id": 7, "class": "car", "confidence": 0.9, "bbox": {"x1": u - 20, "y1": v - 15, "x2": u + 20, "y2": v + 15}}
     return {"schema_version": "0.1.0", "frame_id": frame_id, "timestamp_ns": t_ns, "image_width": 1280, "image_height": 960, "detections": [det]}
 
 
