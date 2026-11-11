@@ -230,6 +230,16 @@ class FleetLink:
             time.sleep(0.05)
         raise LinkError(f"{timeout_s} 秒內沒收到這些無人機的 FleetPose：{sorted(set(drone_ids) - set(self.poses()))}")
 
+    def wait_for_fresh_poses(self, drone_ids, since_s: float, timeout_s: float = 2.0) -> None:
+        """等每架都收到 since_s（time.monotonic()）之後的 FleetPose。"""
+        end = time.monotonic() + timeout_s
+        while time.monotonic() < end:
+            recs = self.poses()
+            if all(d in recs and recs[d].received_s > since_s for d in drone_ids):
+                return
+            time.sleep(0.01)
+        raise LinkError(f"{timeout_s} 秒內沒收到新的 FleetPose")
+
     def send_goals(self, goals: List[dict]) -> None:
         """送出一批 GoalPoint（§10.6）。非阻塞；ack 由背景執行緒統計在 stats。"""
         if not goals:

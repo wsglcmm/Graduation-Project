@@ -52,6 +52,8 @@ class SitlFleet:
         if landed:
             print(f"起飛中：{', '.join(sorted(landed))}（約 25 秒）…", flush=True)
             self.link.command("takeoff", timeout_s=timeout_s)
+            # takeoff 的回覆可能比下一則 FleetPose 早到（20 Hz），等每架都有回覆之後的新位姿再判斷
+            self.link.wait_for_fresh_poses(drone_ids, since_s=time.monotonic())
         bad = [did for did, r in self.link.poses().items() if did in drone_ids and r.pose.status != "flying"]
         if bad:
             raise LinkError(f"這些無人機沒有進入飛行狀態：{bad}")
