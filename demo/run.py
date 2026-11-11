@@ -211,20 +211,34 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=None, help="指標與事件輸出資料夾（預設 output/demo/<時間>）")
     ap.add_argument("--cmd", action="append", default=[], metavar="秒數=指令", help="預排操作員指令，可重複（例如 15=三架包圍那台車）")
+    ap.add_argument("--fleet", choices=("sim", "sitl"), default="sim",
+                    help="sim = 內建替身；sitl = 連 A 的 3 架 SITL（agent_server，或 python -m fleet_link.fake_server）")
+    ap.add_argument("--uri", default="ws://127.0.0.1:8765", help="A 的 agent_server 位址（--fleet sitl 時使用）")
     args = ap.parse_args(argv)
 
     cam = load_camera_config(ROOT / "config" / "camera.yaml")
     err = load_error_model(ROOT / "config" / "error_model.yaml")
     scripted = parse_scripted(args.cmd)
     commander = make_commander(args.planner, args.period)
-    engine = DemoEngine(cam, err, commander, rabbit=RabbitConfig(seed=args.seed), seed=args.seed)
+    link, fleet = None, None
+    if args.fleet == "sitl":
+        from fleet_link import FleetLink, SitlFleet
+
+        link = FleetLink(args.uri).start()
+        fleet = SitlFleet(link)
+        fleet.ensure_airborne(commander.drone_ids)
+        print(f"已連上 {args.uri}：{', '.join(s.drone_id for s in fleet.states())}", flush=True)
+    engine = DemoEngine(cam, err, commander, rabbit=RabbitConfig(seed=args.seed), seed=args.seed, fleet=fleet)
     try:
         if args.headless:
-            run_headless(engine, args.duration, realtime=args.planner == "llm", scripted=scripted)
+            run_headless(engine, args.duration, realtime=args.planner == "llm" or link is not None, scripted=scripted)
         else:
-            run_gui(engine, args.speed, scripted)
+            run_gui(engine, 1.0 if link is not None else args.speed, scripted)  # SITL 照真實時間跑，不能快轉
     finally:
         commander.close()
+        if link is not None:
+            print("連線統計：" + json.dumps(link.stats.summary(), ensure_ascii=False))
+            link.close()
 
     out = Path(args.out) if args.out else ROOT / "output" / "demo" / time.strftime("%Y%m%d_%H%M%S")
     out.mkdir(parents=True, exist_ok=True)

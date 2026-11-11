@@ -102,3 +102,36 @@ python -m demo.benchmark --planner llm --period 5
 - `--period`：多久問一次 Agent（預設 2 秒）。越短反應越快，但 API 花費和排隊都會增加。
 - `.env` 的 `AGENT_PROVIDER`（`gemini` / `anthropic`）、`AGENT_MODEL`（預設 `gemini-3.1-flash-lite`）、`AGENT_FALLBACK_MODELS`（預設 `gemini-3.5-flash-lite`，逗號分隔，空字串代表不備援）、`AGENT_THINKING`（Gemini 思考程度，例如 `minimal` 可降低延遲）、`AGENT_TIMEOUT_S`（預設 10）。
 - `--seed`：換一條兔子路線。
+
+## 接 A 的 3 架 SITL（Phase 3）
+
+Demo 引擎的機隊後端可以切換：預設用內建替身 `sim2d`，加 `--fleet sitl` 就改連 A 的 `agent_server`（規格 §10.2 FleetPose、§10.6 GoalPoint）。融合、Agent、隊形規劃都不用改。
+
+**連 A 在學校伺服器上的模擬**（A 的伺服器只綁 127.0.0.1:8765，要先用 SSH 通道轉到自己電腦；帳號向 A 索取）：
+
+```powershell
+ssh -N -L 8765:127.0.0.1:8765 帳號@伺服器位址
+```
+
+保持這個視窗開著，另開一個終端機：
+
+```powershell
+python -m demo.run --fleet sitl
+python -m demo.run --fleet sitl --planner llm --period 5
+```
+
+還在地上的話會先送 takeoff，等三架都到高度層（約 25 秒）再開始。結束時會印出連線統計：收到幾則 FleetPose、送出幾個 GoalPoint、被 A 修改或拒絕幾次與最近的原因、ack 來回延遲。
+
+**沒有學校伺服器時**：`fleet_link/fake_server.py` 模仿 A 的協定與安全規則（高度層 25 / 30 / 35 m、目標點推開 6 m、±80 m、速度上限 3 m/s、1 s 沒收到目標點就懸停、3 s 沒任何訊息全部懸停），可以先在自己電腦上測：
+
+```powershell
+python -m fleet_link.fake_server
+```
+
+另開一個終端機跑 `python -m demo.run --fleet sitl`。
+
+注意：
+- 連 SITL 時一律照真實時間跑，不能快轉。
+- 隊形規劃的目標點速度會自動限制在 A 的上限（3 m/s）。上限比內建替身的 8 m/s 低很多，追 2～5 m/s 的目標時包圍時間比例會明顯下降，這是要和 A 討論的事項。
+- A 在 11/10 新增的讓路（yield）欄位會照收，但 C 目前不依賴；等規格 §10.8 定案再接到面板。
+

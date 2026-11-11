@@ -117,3 +117,26 @@ def test_connect_failure_is_clear():
     with pytest.raises(LinkError, match="連不上"):
         FleetLink(f"ws://127.0.0.1:{port}", connect_timeout_s=1.0).start()
 
+<<<<<<< Updated upstream
+=======
+
+def test_demo_engine_runs_on_sitl_backend(link):
+    """Demo 引擎改用 SITL 後端：介面同 FleetSim，引擎與 Agent 不用改。"""
+    from coord_transform.config import load_camera_config, load_error_model
+    from demo.engine import DemoEngine
+    from demo.run import ROOT
+    from llm_agent.commander import Commander
+    from sim2d import RabbitConfig
+
+    fleet = SitlFleet(link)
+    fleet.ensure_airborne(IDS)
+    eng = DemoEngine(load_camera_config(ROOT / "config" / "camera.yaml"), load_error_model(ROOT / "config" / "error_model.yaml"),
+                     Commander(IDS, llm=None, period_s=1.0), rabbit=RabbitConfig(seed=0), fleet=fleet)
+    assert eng.planner.cfg.max_speed_mps == 3.0  # 目標點不要求超過 A 的速度上限
+    for _ in range(25):  # 2.5 秒，照真實時間
+        eng.step()
+        time.sleep(eng.dt)
+    assert link.stats.goals_sent > 0 and link.stats.rejected == 0
+    assert all("上限" not in r for r in link.stats.last_reason.values())
+    assert fleet.min_pair_distance_m >= 5.0
+>>>>>>> Stashed changes

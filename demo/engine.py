@@ -18,7 +18,7 @@ from coord_transform.config import CameraConfig
 from coord_transform.uncertainty import ErrorModel
 from fusion import TargetTracker, ViewModel, fuse
 from llm_agent.commander import Commander
-from planner import FormationPlanner
+from planner import FormationConfig, FormationPlanner
 from sim2d import FleetSim, RabbitConfig, RabbitPath
 
 DEFAULT_START = {"uav1": (-30.0, -20.0, 25.0), "uav2": (-30.0, 0.0, 30.0), "uav3": (-30.0, 20.0, 35.0)}
@@ -91,16 +91,19 @@ def is_encircled(drones, tn: float, te: float, radius: float) -> bool:
 
 class DemoEngine:
     def __init__(self, cam: CameraConfig, err: ErrorModel, commander: Commander, rabbit: RabbitConfig = RabbitConfig(),
-                 start=None, seed: int = 0, dt: float = 0.1):
-        start = start or DEFAULT_START
+                 start=None, seed: int = 0, dt: float = 0.1, fleet=None):
+        """fleet：機隊後端，介面同 sim2d.FleetSim。None = 用 FleetSim 替身；接 A 的 SITL 時傳 fleet_link.SitlFleet。"""
+        start = start or (fleet.start_positions() if fleet is not None else DEFAULT_START)
         self.dt, self.t_ns = dt, 0
         self.rng = np.random.default_rng(seed)
         self.view = ViewModel(cam, err)
         self.rabbit = RabbitPath(rabbit)
         self.tracker = TargetTracker(1, "car")
         self.commander = commander
-        self.planner = FormationPlanner(home={k: (v[0], v[1]) for k, v in start.items()})
-        self.sim = FleetSim(start)
+        cap = getattr(fleet, "max_speed_mps", None)  # A 的速度上限（SitlFleet 提供）；目標點不要求超過它
+        cfg = FormationConfig(max_speed_mps=cap) if cap else FormationConfig()
+        self.planner = FormationPlanner(home={k: (v[0], v[1]) for k, v in start.items()}, cfg=cfg)
+        self.sim = fleet if fleet is not None else FleetSim(start)
         self.metrics = Metrics()
         self.target_state: Optional[dict] = None
         self.goals: List[dict] = []
