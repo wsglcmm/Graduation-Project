@@ -117,8 +117,6 @@ def test_connect_failure_is_clear():
     with pytest.raises(LinkError, match="連不上"):
         FleetLink(f"ws://127.0.0.1:{port}", connect_timeout_s=1.0).start()
 
-<<<<<<< Updated upstream
-=======
 
 def test_demo_engine_runs_on_sitl_backend(link):
     """Demo 引擎改用 SITL 後端：介面同 FleetSim，引擎與 Agent 不用改。"""
@@ -139,4 +137,3 @@ def test_demo_engine_runs_on_sitl_backend(link):
     assert link.stats.goals_sent > 0 and link.stats.rejected == 0
     assert all("上限" not in r for r in link.stats.last_reason.values())
     assert fleet.min_pair_distance_m >= 5.0
->>>>>>> Stashed changes
