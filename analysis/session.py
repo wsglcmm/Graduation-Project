@@ -74,6 +74,7 @@ class Session:
     poses: List[dict]
     frames: List[dict]  # detections.jsonl；沒有時為空（pose-only）
     truth: Dict[str, TruthTrack] = field(default_factory=dict)
+    dropped_untracked: int = 0  # 載入時丟掉的 track_id < 0 偵測數
 
     @property
     def has_detections(self) -> bool:
@@ -152,7 +153,21 @@ def load_session(path) -> Session:
     poses = sorted(read_jsonl(path / "poses.jsonl"), key=lambda m: m["timestamp_ns"])
     det = path / "detections.jsonl"
     frames = sorted(read_jsonl(det), key=lambda m: m["timestamp_ns"]) if det.exists() else []
-    return Session(path, meta, poses, frames, truth)
+    dropped = _drop_untracked(frames)
+    ses = Session(path, meta, poses, frames, truth)
+    ses.dropped_untracked = dropped
+    return ses
+
+
+def _drop_untracked(frames: List[dict]) -> int:
+    """丟掉 track_id < 0 的偵測（ByteTrack 尚未確認的目標；規格 §3 要求 ≥ 0）。就地修改，回傳丟掉的數量。"""
+    n = 0
+    for f in frames:
+        dets = f.get("detections", [])
+        keep = [d for d in dets if d.get("track_id", 0) >= 0]
+        n += len(dets) - len(keep)
+        f["detections"] = keep
+    return n
 
 
 def compensate_position_lead(session: Session, lead_s: float) -> int:

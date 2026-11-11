@@ -269,3 +269,27 @@ def test_velocity_lead_compensation_skips_poses_without_velocity(tmp_path):
     assert all("velocity_ned_mps" not in p for p in ses.poses)  # 合成資料沒有速度
     first = dict(ses.poses[0]["position_ned_m"])
     assert compensate_position_lead(ses, 0.1) == 0 and ses.poses[0]["position_ned_m"] == first
+
+
+def test_untracked_detections_are_dropped_on_load(tmp_path):
+    """B 的 ByteTrack 輸出可能有 track_id = -1（尚未確認的目標）；載入時略過，不讓整幀驗證失敗。"""
+    d = generate(tmp_path / "s", CAM, dataclasses.replace(NOISELESS, duration_s=1.0))
+    rows = [json.loads(line) for line in (d / "detections.jsonl").read_text(encoding="utf-8").splitlines()]
+    n = sum(len(r["detections"]) for r in rows)
+    for r in rows[:3]:
+        r["detections"].append({**r["detections"][0], "track_id": -1}) if r["detections"] else None
+    (d / "detections.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    ses = load_session(d)
+    assert ses.dropped_untracked == 3
+    assert sum(len(f["detections"]) for f in ses.frames) == n
+
+
+def test_pixel_errors_merge_across_sessions(tmp_path):
+    a = generate(tmp_path / "a", CAM, dataclasses.replace(NOISELESS, duration_s=1.0))
+    b = generate(tmp_path / "b", CAM, dataclasses.replace(NOISELESS, duration_s=1.0, seed=3))
+    _, _ = cal.main([str(a), str(b), "--out", str(tmp_path / "cal")])
+    report = json.loads((tmp_path / "cal" / "calibration.json").read_text(encoding="utf-8"))
+    per = report["pixel_per_session"]
+    assert set(per) == {"a", "b"}
+    for cls, st in report["pixel"].items():
+        assert st["u"]["n"] == sum(per[s][cls]["u"]["n"] for s in per if cls in per[s])

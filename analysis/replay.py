@@ -243,6 +243,8 @@ def main(argv=None):
     session = load_session(args.session)
     if not session.has_detections:
         raise SystemExit(f"{session.path} 沒有 detections.jsonl：重播需要 B 的偵測結果。只有姿態時請用 python -m analysis.calibrate_error_model")
+    if session.dropped_untracked:
+        print(f"略過 {session.dropped_untracked} 筆 track_id < 0 的偵測（追蹤器尚未確認的目標，規格 §3 要求 ≥ 0）")
     if args.position_lead_s:
         compensate_position_lead(session, args.position_lead_s)
     cam = load_camera_config(args.camera)

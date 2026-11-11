@@ -135,8 +135,8 @@ def estimate_position_lag(session, max_ms: float = 300.0, min_speed: float = 0.5
     return {"lag_ms": float(ms), "reliable": bool(reliable), "n": n, "rmse_zero_m": zero, "rmse_best_m": best}
 
 
-def pixel_errors(session, cam, reference, frame_time_offset_ns=0, gate_px=DEFAULT_GATE_PX):
-    """B 的參考點像素 − 真值投影像素，依類別分組。"""
+def pixel_error_samples(session, cam, reference, frame_time_offset_ns=0, gate_px=DEFAULT_GATE_PX) -> dict:
+    """B 的參考點像素 − 真值投影像素的逐筆樣本，依類別分組：{class: [(du, dv), ...]}。"""
     res = {}
     for raw in session.frames:
         f = DetectionFrame.model_validate(raw)
@@ -166,11 +166,20 @@ def pixel_errors(session, cam, reference, frame_time_offset_ns=0, gate_px=DEFAUL
                 continue
             used.add(name)
             res.setdefault(det.cls, []).append((u - uv[0], v - uv[1]))
+    return res
+
+
+def _pixel_stats(samples: dict) -> dict:
     out = {}
-    for cls, r in res.items():
+    for cls, r in samples.items():
         r = np.array(r)
         out[cls] = {"u": _stats(r[:, 0]), "v": _stats(r[:, 1])}
     return out
+
+
+def pixel_errors(session, cam, reference, frame_time_offset_ns=0, gate_px=DEFAULT_GATE_PX):
+    """B 的參考點像素 − 真值投影像素的統計，依類別分組。"""
+    return _pixel_stats(pixel_error_samples(session, cam, reference, frame_time_offset_ns, gate_px))
 
 
 def suggest(pose_err, pix_err):
@@ -293,10 +302,16 @@ def main(argv=None):
 
     # 3) 像素誤差：只有附 detections.jsonl 的 session
     pix_samples = [ses for ses in sessions if ses.has_detections]
-    pix_err = {}
+    merged_pix = {}
+    pix_per_session = {}
     for ses in pix_samples:
-        for cls, st in pixel_errors(ses, cam, reference, offset_ns).items():
-            pix_err.setdefault(cls, st)  # 多 session 的像素合併留待 B 的資料到齊再做
+        samples = pixel_error_samples(ses, cam, reference, offset_ns)
+        pix_per_session[ses.path.name] = _pixel_stats(samples)
+        for cls, r in samples.items():
+            merged_pix.setdefault(cls, []).extend(r)
+        if ses.dropped_untracked:
+            print(f"（{ses.path.name}：略過 {ses.dropped_untracked} 筆 track_id < 0 的偵測）")
+    pix_err = _pixel_stats(merged_pix)
     suggestion, warnings = suggest(pose_err, pix_err)
     if not pix_samples:  # pose-only：不是配對失敗，是還沒有偵測資料
         warnings = [w for w in warnings if "像素誤差無法標定" not in w]
@@ -319,7 +334,8 @@ def main(argv=None):
     (out_dir / "error_model_suggested.yaml").write_text(text, encoding="utf-8")
     report = {"sessions": [str(ses.path) for ses in sessions], "position_lead_s_applied": args.position_lead_s,
               "position_lag_ms_applied": lag_ms, "position_lag_estimates": lags,
-              "pose": pose_err, "pose_per_session": per_session, "pixel": pix_err, "suggestion": suggestion,
+              "pose": pose_err, "pose_per_session": per_session, "pixel": pix_err, "pixel_per_session": pix_per_session,
+              "suggestion": suggestion,
               "warnings": warnings, "reference": reference}
     (out_dir / "calibration.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print("\n建議值（已寫入 error_model_suggested.yaml）：\n" + text)
