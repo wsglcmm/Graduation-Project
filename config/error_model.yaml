@@ -3,10 +3,10 @@
 # 2026-11-02 用 A 重錄的 5 段 Gazebo 紀錄標定（verify 20 m、hover 20/30/50 m、follow 20 m，約 4.2 萬筆姿態）：
 #   python -m analysis.calibrate_error_model <5 個 session> --estimate-position-lag
 # 這批已設 EKF2_GPS_DELAY = 0、材質已修正，取代 11/01 那批（舊資料重播時仍要加 --position-lead-s 0.095）。
-# 這批資料沒有 detections.jsonl（pose-only），所以 pixel_sigma_px 仍是假設值。
+# 像素誤差：B 11/10 以 VisDrone 微調的 YOLOv8s（best.pt）對同 5 段跑偵測，車 4,429 筆、人 1,764 筆。
 # 選值原則：取「追蹤飛行時」的情況並保守取整，避免 uncertainty_m 低估。
 
-pixel_sigma_px: 2.0         # ASSUMED：待 B 對 A 的 frames/ 跑完偵測後標定
+pixel_sigma_px: 6.0         # 實測 5.7 px（center_half_height 參考點；車 u/v 4.1/7.7、人 7.0/2.0），原本假設 2.0
 
 roll_pitch_sigma_deg: 0.1   # 實測：懸停 0.014°；跟車 0.03–0.04°（11/01 舊資料跟車轉彎曾到 0.25°，取 0.1 保守）
 
