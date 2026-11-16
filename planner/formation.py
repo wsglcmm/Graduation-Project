@@ -14,6 +14,8 @@ LLM 只說「uav2 當左翼攔截」，「左翼攔截要站在哪個座標」�
     herder / capturer / blocker   捕捉策略（mode = capture）的驅趕 / 抓拍 / 封鎖，幾何見 planner/capture.py
 encircle / track 時，目標位置用「現在位置 + 速度 × lead_s」，讓攔截點提前，不會永遠追在後面。
 高度依 drone_id 分層（A 的安全層最後把關，這裡先避免垂直衝突）。
+送出前再做水平去衝突（planner/deconflict.py，防撞第二層）：任兩架目標點水平 ≥ min_goal_separation_m，
+優先權低的角色讓開；返航不做（各機回自己的出生點，由 A 的返航流程負責）。
 """
 import math
 from dataclasses import dataclass, field
@@ -22,6 +24,7 @@ from typing import Dict, List, Optional, Sequence
 from llm_agent.fleet_schema import CAPTURE_ONLY_ROLES, PLAN_SCHEMA_VERSION, Plan
 
 from .capture import CaptureConfig, CaptureGeometry, CaptureZone
+from .deconflict import Adjustment, deconflict_goals, yield_crossings
 
 ROLE_ANGLES = {"chaser": math.pi, "blocker_left": -math.pi / 3, "blocker_right": math.pi / 3}
 
@@ -39,6 +42,10 @@ class FormationConfig:
     initial_search_center: tuple = (0.0, 0.0)  # 還沒看過目標時的搜尋中心（場地中心或操作員給的大致位置）
     max_speed_mps: float = 8.0  # 建議值；A 的速度上限優先
     capture: CaptureConfig = field(default_factory=CaptureConfig)
+    min_goal_separation_m: float = 6.0  # 防撞第二層；0 = 關閉（只用來做前後對照）
+    yield_margin_m: float = 2.0  # 預測交錯距離 < 6 + 2 m 就讓路（取捨見 planner/deconflict.py）
+    yield_horizon_s: float = 6.0  # 預測時間上限
+    yield_lookahead_m: float = 20.0  # 前瞻距離：預測時間 = clamp(20 m / 速度上限, 2, 6) s
 
 
 class FormationPlanner:
@@ -49,6 +56,8 @@ class FormationPlanner:
         self._search_center: Optional[tuple] = None
         self._search_since_ns: Optional[int] = None
         self.capture = CaptureGeometry(cfg.capture)
+        self.last_adjustments: List[Adjustment] = []  # 最近一次去衝突改了哪些目標點（之後進動作日誌）
+        self.adjustment_count = 0  # 累計被去衝突修改的目標點數
 
     @property
     def capture_zone(self) -> Optional[CaptureZone]:
@@ -103,6 +112,16 @@ class FormationPlanner:
             if yaw is not None:
                 gp["yaw_rad"] = yaw
             out.append(gp)
+        if plan.mode == "return_home":
+            self.last_adjustments = []
+            return out
+        out, adj = deconflict_goals(out, roles, self.cfg.min_goal_separation_m)
+        # 預測時間用「前瞻距離 / 速度上限」換算：速度快時看太遠會有很多假警報、一直讓路（實測 8 m/s 時視野內比例掉 9%）
+        horizon = max(2.0, min(self.cfg.yield_horizon_s, self.cfg.yield_lookahead_m / self.cfg.max_speed_mps))
+        out, adj2 = yield_crossings(out, drones, roles, self.cfg.min_goal_separation_m, horizon,
+                                    vmax=self.cfg.max_speed_mps, margin_m=self.cfg.yield_margin_m)
+        self.last_adjustments = adj + adj2
+        self.adjustment_count += len(self.last_adjustments)
         return out
 
     def _goal_for(self, plan, role, d, tgt, drones, t_ns, k, count):

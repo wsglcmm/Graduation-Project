@@ -5,7 +5,7 @@ import pytest
 
 from fleet_fixtures import DRONES, ENC, IDS, S, target  # noqa: F401
 from llm_agent.fleet_schema import Plan
-from planner import FormationPlanner
+from planner import FormationConfig, FormationPlanner
 
 
 # ---------- 隊形規劃 ----------
@@ -43,7 +43,7 @@ def test_hold_keeps_position_and_track_uses_wider_radius():
 
 
 def test_search_orbits_last_known_position_with_phase_offsets():
-    fp = FormationPlanner()
+    fp = FormationPlanner(FormationConfig(min_goal_separation_m=0))  # 只驗幾何；去衝突另外測（test_deconflict.py）
     fp.goal_points(plan(), "p", DRONES, [target(n=50, e=10, vn=0)], 0)  # 記住最後位置
     srch = plan("search", target_id=None, assignments=[{"drone_id": i, "role": "searcher"} for i in IDS], formation={"radius_m": 20.0})
     gps = fp.goal_points(srch, "p", DRONES, [target(n=50, e=10, status="lost")], 0)
