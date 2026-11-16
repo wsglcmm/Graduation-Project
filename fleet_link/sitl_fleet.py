@@ -26,6 +26,7 @@ class SitlFleet:
         self.min_interval_s = 1.0 / send_hz
         self._last_send = 0.0
         self.min_pair_distance_m = math.inf
+        self.min_pair_horizontal_m = math.inf
 
     def states(self) -> List[DroneState]:
         return self.link.states()
@@ -40,6 +41,9 @@ class SitlFleet:
         d = self.link.min_pair_distance_m()
         if math.isfinite(d):
             self.min_pair_distance_m = min(self.min_pair_distance_m, d)
+        h = self.link.min_pair_horizontal_m()
+        if math.isfinite(h):
+            self.min_pair_horizontal_m = min(self.min_pair_horizontal_m, h)
 
     def start_positions(self) -> Dict[str, tuple]:
         """目前各機位置（n, e, alt），給隊形規劃當 home。"""

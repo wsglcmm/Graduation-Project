@@ -75,6 +75,7 @@ class Metrics:
             "llm_latency_ms_mean": float(np.mean(lat)) if lat else None,
             "llm_latency_ms_p95": float(np.percentile(lat, 95)) if lat else None,
             "min_drone_distance_m": sim.min_pair_distance_m,
+            "min_drone_horizontal_m": getattr(sim, "min_pair_horizontal_m", None),
             "time_to_capture_s": self.captures[0]["t_s"] if self.captures else None,
             "time_to_capture_by_capturer_s": next((c["t_s"] for c in self.captures if c["role"] == "capturer"), None),
             "captures": len(self.captures),
@@ -174,4 +175,6 @@ class DemoEngine:
         m._was_encircled = now
 
     def summary(self) -> dict:
-        return self.metrics.summary(self.commander, self.sim)
+        out = self.metrics.summary(self.commander, self.sim)
+        out["goal_deconflict_adjustments"] = self.planner.adjustment_count
+        return out

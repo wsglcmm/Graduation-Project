@@ -285,6 +285,11 @@ class FleetLink:
                 best = min(best, math.dist((a.n, a.e, a.alt_m), (b.n, b.e, b.alt_m)))
         return best
 
+    def min_pair_horizontal_m(self) -> float:
+        """目前任兩架的最小水平距離。"""
+        s = self.states()
+        return min((math.dist((a.n, a.e), (b.n, b.e)) for i, a in enumerate(s) for b in s[i + 1:]), default=math.inf)
+
     def _submit(self, coro):
         if self._loop is None or self._ws is None:
             raise LinkError("尚未連線，請先呼叫 start()")

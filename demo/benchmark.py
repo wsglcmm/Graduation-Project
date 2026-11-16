@@ -40,6 +40,7 @@ REPORT_KEYS = (  # summary.md 的欄位順序（key, 標題, 格式）
     ("visible_fraction", "視野內比例", "{:.0%}"),
     ("estimate_rmse_m", "估計誤差 RMSE (m)", "{:.2f}"),
     ("min_drone_distance_m", "最小機間距離 (m)", "{:.1f}"),
+    ("min_drone_horizontal_m", "最小水平距離 (m)", "{:.1f}"),
     ("plan_valid_rate", "計畫合法率", "{:.0%}"),
     ("plan_latency_ms_mean", "延遲平均 (ms)", "{:.0f}"),
     ("operator_response_s", "指令回應 (s)", "{:.2f}"),

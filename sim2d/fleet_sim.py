@@ -46,6 +46,7 @@ class FleetSim:
             alt = pos[2] if len(pos) > 2 else start_alt_m
             self.drones.append(_Drone(did, float(pos[0]), float(pos[1]), float(alt)))
         self.min_pair_distance_m = math.inf
+        self.min_pair_horizontal_m = math.inf  # 水平最小距離：看得出是不是靠高度層「疊著」撐住 3D 距離
 
     def apply_goals(self, goal_points: Sequence[dict], t_ns: int) -> None:
         by_id = {d.drone_id: d for d in self.drones}
@@ -97,6 +98,7 @@ class FleetSim:
         for i, a in enumerate(self.drones):
             for b in self.drones[i + 1 :]:
                 self.min_pair_distance_m = min(self.min_pair_distance_m, math.dist((a.n, a.e, a.alt), (b.n, b.e, b.alt)))
+                self.min_pair_horizontal_m = min(self.min_pair_horizontal_m, math.dist((a.n, a.e), (b.n, b.e)))
 
     def states(self) -> List[DroneState]:
         return [DroneState(d.drone_id, d.n, d.e, d.alt, d.yaw) for d in self.drones]
