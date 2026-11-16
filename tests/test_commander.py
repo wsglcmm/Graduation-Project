@@ -376,12 +376,22 @@ def test_command_ignores_blank_input():
     assert c.tick(1, DRONES, [target()]) == []
 
 
-def test_operator_encircle_without_visible_target_does_not_lock_search():
+def test_operator_encircle_without_visible_target_remembers_intent():
     llm = ScriptedClient([json.dumps(SEARCH), json.dumps(ENC)])
     c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
     c.command("三架一起把那台車包圍起來")
     _run(c, 0, [])  # 還沒有目標 → 只能搜尋
-    assert c.current.mode == "search" and c.directive is None
+    assert c.current.mode == "search" and c.directive == "encircle"  # 記住要包圍，但允許先搜尋
     ev = _run(c, 2 * S)  # 發現目標後可以自己切到包圍
     assert ev[-1].valid and c.current.mode == "encircle"
     c.close()
+
+
+def test_rule_capture_command_before_target_visible_is_kept():
+    """「把車趕進捕捉區抓拍」時還看不到車：先搜尋，發現後照指令捕捉，不會回到預設策略。"""
+    c = Commander(IDS, llm=None, period_s=1.0, clock=FakeClock())
+    c.command("把那台車趕進捕捉區抓拍")
+    c.tick(0, DRONES, [])
+    assert c.current.mode == "search" and c.directive == "capture"
+    c.tick(2 * S, DRONES, [target()])
+    assert c.current.mode == "capture"

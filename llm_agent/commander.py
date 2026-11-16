@@ -30,7 +30,7 @@ from typing import Callable, List, Optional, Sequence
 
 from .fleet_prompt import SYSTEM_PROMPT, build_fleet_messages, summarize_state
 from .fleet_schema import Plan, parse_plan
-from .rule_planner import rule_plan
+from .rule_planner import _parse_operator, rule_plan
 
 MAX_OPERATOR_RETRIES = 2
 LOCKING_MODES = ("hold", "return_home")  # 操作員下這些指令後，Agent 暫停到下一個操作員指令
@@ -149,8 +149,14 @@ class Commander:
         if ev_kw.get("trigger") == "operator":
             self.directive, self.directive_text = plan.mode, ev_kw.get("operator_command")
             if plan.mode == "search" and not has_target:
-                # 例如「包圍那台車」但目前看不到車 → 只能先搜尋；這不是操作員要「只搜尋」，不鎖定
-                self.directive = self.directive_text = None
+                # 例如「包圍那台車」但目前看不到車 → 只能先搜尋；這不是操作員要「只搜尋」。
+                # 記住操作員真正要的模式（包圍 / 追蹤 / 捕捉，都允許先 search），發現目標後照指令執行；
+                # 看不出要什麼就不鎖定。之前直接不鎖定，結果發現目標後回到預設策略，指令被忘記（實測發現）。
+                intent = _parse_operator(self.directive_text)
+                if intent in ("track", "encircle", "capture"):
+                    self.directive = intent
+                else:
+                    self.directive = self.directive_text = None
         ev = AgentEvent(plan_id=self.current_id, valid=True, plan=plan.model_dump(), **ev_kw)
         self.events.append(ev)
         return ev
