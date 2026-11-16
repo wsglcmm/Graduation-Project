@@ -9,6 +9,8 @@ import itertools
 import math
 from typing import Optional, Sequence
 
+from planner.capture import CaptureConfig, propose_zone
+
 from .fleet_schema import Plan
 
 ENCIRCLE_RANGE_FACTOR = 2.5  # 機群中心離目標 < 半徑 × 這個倍數時，從 track 切換到 encircle
@@ -26,7 +28,9 @@ def _slot_offsets(heading: float, radius: float):
 def _parse_operator(cmd: Optional[str]) -> Optional[str]:
     if not cmd:
         return None
+    # 捕捉關鍵字放在「追 / 跟」前面：「跟上去抓拍」是捕捉，不是跟隨
     table = (("返航", "return_home"), ("回家", "return_home"), ("懸停", "hold"), ("停", "hold"),
+             ("抓拍", "capture"), ("捕捉", "capture"), ("驅趕", "capture"), ("趕", "capture"),
              ("包圍", "encircle"), ("圍", "encircle"), ("搜尋", "search"), ("找", "search"), ("追", "track"), ("跟", "track"))
     for key, mode in table:
         if key in cmd:
@@ -34,7 +38,30 @@ def _parse_operator(cmd: Optional[str]) -> Optional[str]:
     return "hold"  # 看不懂的指令：保守懸停
 
 
-def rule_plan(drones: Sequence, targets: Sequence[dict], operator_command: Optional[str] = None, radius_m: float = 15.0) -> Plan:
+def capture_assignment(drones: Sequence, tn: float, te: float, cfg: CaptureConfig = CaptureConfig()) -> list:
+    """捕捉策略的角色分派：用和隊形規劃器相同的方法估捕捉區，
+    再窮舉排列，選「抓拍機飛到捕捉區 + 驅趕機飛到目標後方 + 封鎖機飛到側面」總距離最短的。"""
+    zone = propose_zone(tn, te, drones, cfg)
+    un, ue = tn - zone.n, te - zone.e
+    r = math.hypot(un, ue) or 1.0
+    un, ue = un / r, ue / r
+    slots = {"capturer": (zone.n, zone.e),
+             "herder": (tn + un * cfg.herd_distance_m, te + ue * cfg.herd_distance_m),
+             "blocker": (tn - ue * cfg.block_distance_m, te + un * cfg.block_distance_m)}
+    roles = ["capturer", "herder", "blocker"] + ["overwatch"] * max(0, len(drones) - 3)
+    if len(drones) == 2:
+        roles = ["capturer", "herder"]
+    best = min(itertools.permutations(roles[: len(drones)]),
+               key=lambda perm: sum(math.hypot(d.n - slots.get(ro, (tn, te))[0], d.e - slots.get(ro, (tn, te))[1])
+                                    for d, ro in zip(drones, perm)))
+    return [{"drone_id": d.drone_id, "role": ro} for d, ro in zip(drones, best)]
+
+
+def rule_plan(drones: Sequence, targets: Sequence[dict], operator_command: Optional[str] = None, radius_m: float = 15.0,
+              strategy: str = "encircle", previous: Optional[Plan] = None) -> Plan:
+    """strategy：沒有操作員指令時的預設策略，encircle（包圍）或 capture（驅趕 → 抓拍）。
+    previous：上一個計畫。同一個目標的 capture 進行中時沿用原本的角色，不要每次重算就換人
+    （驅趕機和抓拍機一直交換，策略會完全失效；這是實測發現的問題）。"""
     ids = [d.drone_id for d in drones]
     live = [t for t in targets if t["status"] != "lost"]
     forced = _parse_operator(operator_command)
@@ -54,6 +81,15 @@ def rule_plan(drones: Sequence, targets: Sequence[dict], operator_command: Optio
     cn, ce = sum(d.n for d in drones) / len(drones), sum(d.e for d in drones) / len(drones)
     heading = math.atan2(v["e"], v["n"]) if speed > 0.3 else math.atan2(p["e"] - ce, p["n"] - cn)
     dist = math.hypot(p["n"] - cn, p["e"] - ce)
+    if len(ids) >= 2 and (forced == "capture" or (forced is None and strategy == "capture")):
+        keep = (previous is not None and previous.mode == "capture" and previous.target_id == tgt["target_id"]
+                and sorted(a.drone_id for a in previous.assignments) == sorted(ids))
+        if keep:
+            return Plan(mode="capture", target_id=tgt["target_id"], assignments=[a.model_dump() for a in previous.assignments],
+                        formation={"radius_m": radius_m}, reason="捕捉進行中，維持原本的角色分工")
+        reason = "驅趕機從後方把目標趕向捕捉區，抓拍機在捕捉區等、目標靠近時迎上去抓拍"
+        return Plan(mode="capture", target_id=tgt["target_id"], assignments=capture_assignment(drones, p["n"], p["e"]),
+                    formation={"radius_m": radius_m}, reason=reason)
     mode = forced if forced in ("track", "encircle", "search") else ("encircle" if dist < ENCIRCLE_RANGE_FACTOR * radius_m else "track")
     if mode == "search":
         return everyone("searcher", "search", "操作員要求搜尋")

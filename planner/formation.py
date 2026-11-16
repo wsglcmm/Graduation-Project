@@ -11,6 +11,7 @@ LLM 只說「uav2 當左翼攔截」，「左翼攔截要站在哪個座標」�
     overwatch       目標正上方，高度 + overwatch_extra_alt_m
     searcher        以最後已知位置為中心繞圈，多架時相位錯開
     idle            原地不動
+    herder / capturer / blocker   捕捉策略（mode = capture）的驅趕 / 抓拍 / 封鎖，幾何見 planner/capture.py
 encircle / track 時，目標位置用「現在位置 + 速度 × lead_s」，讓攔截點提前，不會永遠追在後面。
 高度依 drone_id 分層（A 的安全層最後把關，這裡先避免垂直衝突）。
 """
@@ -18,7 +19,9 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
-from llm_agent.fleet_schema import PLAN_SCHEMA_VERSION, Plan
+from llm_agent.fleet_schema import CAPTURE_ONLY_ROLES, PLAN_SCHEMA_VERSION, Plan
+
+from .capture import CaptureConfig, CaptureGeometry, CaptureZone
 
 ROLE_ANGLES = {"chaser": math.pi, "blocker_left": -math.pi / 3, "blocker_right": math.pi / 3}
 
@@ -35,6 +38,7 @@ class FormationConfig:
     search_max_radius_m: float = 60.0
     initial_search_center: tuple = (0.0, 0.0)  # 還沒看過目標時的搜尋中心（場地中心或操作員給的大致位置）
     max_speed_mps: float = 8.0  # 建議值；A 的速度上限優先
+    capture: CaptureConfig = field(default_factory=CaptureConfig)
 
 
 class FormationPlanner:
@@ -44,6 +48,12 @@ class FormationPlanner:
         self._heading: Optional[float] = None
         self._search_center: Optional[tuple] = None
         self._search_since_ns: Optional[int] = None
+        self.capture = CaptureGeometry(cfg.capture)
+
+    @property
+    def capture_zone(self) -> Optional[CaptureZone]:
+        """目前 capture 的捕捉區（沒有在 capture 時為 None），畫面與指標用。"""
+        return self.capture.zone
 
     def altitude(self, drone_id: str) -> float:
         return self.cfg.altitude_layers_m.get(drone_id, self.cfg.default_altitude_m)
@@ -68,6 +78,10 @@ class FormationPlanner:
             self._search_since_ns = t_ns
         elif not searching:
             self._search_since_ns = None
+        if plan.mode == "capture" and tgt is not None and tgt["status"] != "lost":
+            self.capture.ensure_zone(tgt, drones, self._target_heading(tgt, drones))
+        elif plan.mode != "capture":
+            self.capture.reset()
         roles = {a.drone_id: a.role for a in plan.assignments}
         out = []
         for k, d in enumerate(drones):
@@ -109,6 +123,9 @@ class FormationPlanner:
         pn, pe = p["n"] + v["n"] * self.cfg.lead_s, p["e"] + v["e"] * self.cfg.lead_s
         if role == "overwatch":
             return pn, pe, alt + self.cfg.overwatch_extra_alt_m
+        if plan.mode == "capture" and role in CAPTURE_ONLY_ROLES and self.capture.zone is not None:
+            n, e = self.capture.goal(role, tgt, d)
+            return n, e, alt
         heading = self._target_heading(tgt, drones)
         radius = r * (self.cfg.track_extra_radius_factor if plan.mode == "track" else 1.0)
         a = heading + ROLE_ANGLES.get(role, math.pi)

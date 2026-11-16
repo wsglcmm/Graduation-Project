@@ -34,7 +34,8 @@ from .rule_planner import rule_plan
 
 MAX_OPERATOR_RETRIES = 2
 LOCKING_MODES = ("hold", "return_home")  # 操作員下這些指令後，Agent 暫停到下一個操作員指令
-ALLOWED_UNDER = {"search": ("search",), "track": ("track", "encircle", "search"), "encircle": ("track", "encircle", "search")}
+ALLOWED_UNDER = {"search": ("search",), "track": ("track", "encircle", "search"), "encircle": ("track", "encircle", "search"),
+                 "capture": ("capture", "search")}
 SUPERSEDED = "已被操作員新指令取代，未套用"
 
 
@@ -60,6 +61,7 @@ class Commander:
     drone_ids: Sequence[str]
     llm: Optional[object] = None  # 有 complete(system, messages) 的物件；None = 只用規則式
     period_s: float = 2.0
+    strategy: str = "encircle"  # 沒有操作員指令時規則式用的預設策略：encircle / capture
     clock: Callable[[], float] = time.monotonic  # 量測延遲用的牆鐘
     current: Optional[Plan] = None
     current_id: Optional[str] = None
@@ -223,7 +225,7 @@ class Commander:
 
     def _rule(self, t_ns, drones, targets, trig, cmd, note: Optional[str] = None, rule_cmd: Optional[str] = None) -> AgentEvent:
         start = self.clock()
-        plan = rule_plan(drones, targets, rule_cmd if rule_cmd is not None else cmd)
+        plan = rule_plan(drones, targets, rule_cmd if rule_cmd is not None else cmd, strategy=self.strategy, previous=self.current)
         kw = dict(timestamp_ns=t_ns, trigger=trig, planner="rule", latency_ms=(self.clock() - start) * 1000, operator_command=cmd)
         ev = self._accept(plan, kw, has_target=any(t["status"] != "lost" for t in targets))
         if note:

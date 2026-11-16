@@ -23,20 +23,27 @@ SYSTEM_PROMPT = f"""\
 - search：目標 lost 或還沒出現，全部用 searcher 在最後已知位置附近搜尋
 - track：目標離無人機群很遠，先追上去（chaser 在後方追、其他角色保持在兩側）
 - encircle：已追上目標，包圍它（chaser 在後、blocker_left / blocker_right 在前方左右攔截）
+- capture：捕捉策略。驅趕機把目標趕進捕捉區，抓拍機在捕捉區等，目標靠近時迎上去讓目標進入相機畫面中央抓拍；
+  捕捉區的位置由規劃器決定（機群 → 目標的延長線上、目標前方）
 - hold：原地懸停（操作員要求暫停，或情況不明時）
 - return_home：返航
 
 # 角色 role：{", ".join(ROLES)}
 - chaser：從目標後方追；blocker_left / blocker_right：在目標行進方向的前方左右攔截
 - overwatch：在目標正上方較高處持續監看；searcher：搜尋；idle：不動
+- herder（驅趕）：繞到目標遠離捕捉區的那一側施壓；capturer（抓拍）：在捕捉區伏擊、最後迎上去抓拍；
+  blocker（封鎖）：守住目標往側邊逃的方向。這三個角色只能在 capture 使用
 
 # 規則
 1. assignments 必須列出世界狀態中的每一架無人機，恰好一次。
 2. track、encircle 必須指定 target_id，且必須是世界狀態中存在的目標。
 3. 目標 status 是 lost 時用 search；predicted 表示暫時看不到，可以繼續原本的模式。
 4. 角色要考慮位置：離目標後方最近的當 chaser，位於目標行進方向左前、右前的當 blocker。
-5. 操作員指令優先；指令不清楚或做不到時輸出 hold，並在 reason 說明。
-6. 若訊息中有「操作員有效指令」，代表操作員先前的指令仍然有效：mode 必須在它允許的範圍內，
+5. capture 需要恰好一架 capturer、至少一架 herder，只能用 herder / capturer / blocker / overwatch；
+   離目標「後方」（遠離捕捉區那側）最近的當 herder，最靠近捕捉區（目標前方）的當 capturer。
+   操作員說抓拍、捕捉、驅趕、趕進某處時用 capture。
+6. 操作員指令優先；指令不清楚或做不到時輸出 hold，並在 reason 說明。
+7. 若訊息中有「操作員有效指令」，代表操作員先前的指令仍然有效：mode 必須在它允許的範圍內，
    只能調整角色與隊形，不可自行切換到其他模式，直到操作員下新指令。
 """
 
@@ -123,10 +130,17 @@ FEW_SHOT = [
     ),
     (
         _ex_state(_D3, [_T_NORTH]),
-        "幫我拍一張照片",
+        "把那台車趕進捕捉區抓拍",
+        {"mode": "capture", "target_id": 1,
+         "assignments": [{"drone_id": "uav1", "role": "herder"}, {"drone_id": "uav2", "role": "blocker"}, {"drone_id": "uav3", "role": "capturer"}],
+         "formation": {"radius_m": 15.0}, "reason": "uav1 在車後方往北趕，uav3 在前方捕捉區等著抓拍，uav2 守西側"},
+    ),
+    (
+        _ex_state(_D3, [_T_NORTH]),
+        "降落在那棟樓的屋頂上",
         {"mode": "hold", "target_id": None,
          "assignments": [{"drone_id": "uav1", "role": "idle"}, {"drone_id": "uav2", "role": "idle"}, {"drone_id": "uav3", "role": "idle"}],
-         "formation": {"radius_m": 15.0}, "reason": "沒有拍照功能，先懸停等待新指令"},
+         "formation": {"radius_m": 15.0}, "reason": "沒有指定地點降落的功能，先懸停等待新指令"},
     ),
 ]
 

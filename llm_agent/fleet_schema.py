@@ -13,9 +13,13 @@ from typing import List, Literal, Optional, Sequence
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError
 
 PLAN_SCHEMA_VERSION = "0.2.0"
-MODES = ("search", "track", "encircle", "hold", "return_home")
-ROLES = ("chaser", "blocker_left", "blocker_right", "overwatch", "searcher", "idle")
-MODES_NEED_TARGET = ("track", "encircle")
+MODES = ("search", "track", "encircle", "capture", "hold", "return_home")
+ROLES = ("chaser", "blocker_left", "blocker_right", "overwatch", "searcher", "idle", "herder", "capturer", "blocker")
+MODES_NEED_TARGET = ("track", "encircle", "capture")
+# 捕捉策略（capture）：驅趕機 herder 把目標趕向捕捉區、抓拍機 capturer 在捕捉區等並抓拍、封鎖機 blocker 守側翼。
+# 這三個角色只能在 capture 使用；capture 也只能用這三個加上 overwatch（角色專屬白名單的雛形）。
+CAPTURE_ONLY_ROLES = ("herder", "capturer", "blocker")
+CAPTURE_ROLES = CAPTURE_ONLY_ROLES + ("overwatch",)
 
 
 class _Strict(BaseModel):
@@ -56,6 +60,15 @@ def validate_plan(plan: Plan, drone_ids: Sequence[str], target_ids: Sequence[int
             return f"mode={plan.mode} 必須指定 target_id"
         if plan.target_id not in target_ids:
             return f"target_id={plan.target_id} 不存在，目前的目標：{list(target_ids)}"
+    roles = [a.role for a in plan.assignments]
+    if plan.mode == "capture":
+        bad = sorted({r for r in roles if r not in CAPTURE_ROLES})
+        if bad:
+            return f"mode=capture 只能用 {'/'.join(CAPTURE_ROLES)}，收到 {bad}"
+        if roles.count("capturer") != 1 or "herder" not in roles:
+            return "mode=capture 需要恰好一架 capturer、至少一架 herder"
+    elif any(r in CAPTURE_ONLY_ROLES for r in roles):
+        return f"{'/'.join(CAPTURE_ONLY_ROLES)} 只能在 mode=capture 使用"
     return None
 
 
