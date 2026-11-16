@@ -10,6 +10,7 @@
     runs/<劇本>_s<seed>/metrics.json、events.jsonl
 
 除了 engine.summary() 的指標，另外計算：
+    time_to_capture_by_capturer_s / zone_entered_at_s   捕捉策略：抓拍機完成抓拍、目標被趕進捕捉區的時間
     plan_valid_rate / plan_latency_ms_mean   不分規劃者（LLM 或規則式）的計畫合法率與延遲
     agent_plans_while_paused   懸停 / 返航期間 Agent 自己產生的計畫數（應為 0）
     operator_response_s        從下指令到對應計畫生效的時間（平均）
@@ -28,10 +29,12 @@ from coord_transform.config import load_camera_config, load_error_model
 from demo.engine import DemoEngine
 from demo.run import ROOT, feed_scripted, make_commander
 from demo.scenarios import SCENARIOS, Scenario
-from sim2d import RabbitConfig
+from sim2d import EvaderConfig, RabbitConfig
 
 LOCKING = ("hold", "return_home")
 REPORT_KEYS = (  # summary.md 的欄位順序（key, 標題, 格式）
+    ("time_to_capture_by_capturer_s", "抓拍機抓拍 (s)", "{:.1f}"),
+    ("zone_entered_at_s", "趕進捕捉區 (s)", "{:.1f}"),
     ("time_to_encircle_s", "包圍完成 (s)", "{:.1f}"),
     ("encircled_fraction", "包圍時間比例", "{:.0%}"),
     ("visible_fraction", "視野內比例", "{:.0%}"),
@@ -71,8 +74,10 @@ def operator_metrics(events, commands) -> dict:
 
 
 def run_once(scn: Scenario, seed: int, planner: str, period_s: float, cam, err, out_dir: Optional[Path] = None) -> dict:
-    commander = make_commander(planner, period_s)
-    engine = DemoEngine(cam, err, commander, rabbit=RabbitConfig(seed=seed), seed=seed)
+    commander = make_commander(planner, period_s, scn.strategy)
+    evader = EvaderConfig(seed=seed) if scn.target == "evader" else None
+    engine = DemoEngine(cam, err, commander, rabbit=RabbitConfig(seed=seed), seed=seed, evader=evader,
+                        drone_max_speed_mps=3.0 if evader is not None else None)  # 策略場景用 A 的速度上限
     scripted = sorted(scn.commands)
     realtime = planner == "llm"  # LLM 要照真實時間跑，延遲才有意義
     try:
@@ -112,7 +117,7 @@ def _cell(values: List[Optional[float]], fmt: str) -> str:
 
 def summarize(results: List[dict], planner: str) -> str:
     lines = [f"# Benchmark：{'LLM' if planner == 'llm' else '規則式'}", "",
-             "數值為各 seed 的平均 ± 標準差；「未達成」表示該次執行沒有完成包圍。", ""]
+             "數值為各 seed 的平均 ± 標準差；「未達成」表示該次執行沒有達成該項（例如沒有完成包圍或抓拍）。", ""]
     lines.append("| 劇本 | 次數 | " + " | ".join(t for _, t, _ in REPORT_KEYS) + " |")
     lines.append("|---" * (len(REPORT_KEYS) + 2) + "|")
     for name in dict.fromkeys(r["scenario"] for r in results):

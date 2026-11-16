@@ -28,7 +28,8 @@ class RabbitPath:
         self.speed = (cfg.speed_min_mps + cfg.speed_max_mps) / 2
         self._turn = 0.0
 
-    def step(self, dt: float) -> tuple:
+    def step(self, dt: float, drones=None) -> tuple:
+        """drones 不使用（兔子不會對無人機反應），只是讓介面和 Evader 相同。"""
         c = self.cfg
         # 轉彎率做隨機遊走（Ornstein–Uhlenbeck），讓轉彎平滑而不是每步亂跳
         self._turn += (-0.5 * self._turn) * dt + 0.6 * c.max_turn_rate_rps * math.sqrt(dt) * self.rng.normal()

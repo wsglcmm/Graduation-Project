@@ -64,6 +64,15 @@ python -m demo.run --planner llm --headless --duration 90
 | `command_encircle` | 第 10 秒下令包圍（90 s） |
 | `hold_resume` | 15 s 包圍 → 40 s 懸停 → 60 s 恢復包圍（100 s） |
 | `return_home` | 15 s 包圍 → 50 s 返航（75 s） |
+| `evader_encircle` | 策略場景：會逃的目標，預設策略包圍（對照組，120 s） |
+| `evader_capture` | 策略場景：會逃的目標，預設策略驅趕 → 抓拍（120 s） |
+| `command_capture` | 策略場景：第 10 秒下令「把那台車趕進捕捉區抓拍」（120 s） |
+
+策略場景的無人機速度上限用 A 的 3 m/s；只跑策略比較：
+
+```powershell
+python -m demo.benchmark --scenario evader_encircle evader_capture --seeds 0 1 2 3 4 5 6 7 8 9
+```
 
 ```powershell
 python -m demo.benchmark
@@ -73,6 +82,26 @@ python -m demo.benchmark --planner llm --period 5
 規則式是快轉執行，全部劇本 × 3 個 seed 約 10 秒；LLM 照真實時間跑，約 18 分鐘（會用到約 200 次 API 請求，注意免費層額度）。輸出在 `output/benchmark/<時間>_<規劃者>/`：`summary.md`（平均 ± 標準差，可直接貼進報告）、`runs.csv`（每次執行一列，Excel 可直接開）與每次執行的 `metrics.json`、`events.jsonl`。
 
 除了上面的指標，還會計算：計畫合法率與延遲（不分規劃者）、操作員指令回應時間、懸停後恢復到重新包圍的時間，以及「懸停／返航期間 Agent 自己產生的計畫數」（應為 0）。
+
+## 捕捉策略（策略場景）
+
+```powershell
+python -m demo.run --target evader --strategy capture
+python -m demo.run --target evader --planner llm --period 5
+```
+
+第二行在終端機輸入「把那台車趕進捕捉區抓拍」，看 LLM 把自然語言轉成捕捉策略。
+
+| 元件 | 檔案 | 說明 |
+|---|---|---|
+| 會逃的目標 | `sim2d/evader.py` | 簡化逃跑模型：離無人機越近、無人機越是逼近，逃得越快（最高 2.2 m/s < 無人機 3 m/s）；懸停的無人機威脅較小；圓形場地 60 m |
+| 捕捉策略幾何 | `planner/capture.py` | 捕捉區（機群 → 目標延長線、目標前方 35 m）；驅趕機站在目標遠離捕捉區那側；抓拍機在捕捉區伏擊、目標進入 18 m 後迎上去；封鎖機在側後方和驅趕機成 V 字 |
+| 角色分派 | `llm_agent/rule_planner.py` | 依距離分派；同一次捕捉中角色固定（實測：每 2 秒重算就會換人，策略失效） |
+| 抓拍判定 | `demo/capture_judge.py` | 目標在抓拍機影像中央 20% × 20%、像素長度 ≥ 40 px、連續 2 s；裁判用目標真值 |
+
+畫面上的半透明橘色圓是捕捉區；抓拍成功時面板出現「★ 抓拍成功」。指標：`time_to_capture_by_capturer_s`（抓拍機完成抓拍）、`zone_entered_at_s`（目標被趕進捕捉區）、`capture_events`。
+
+**限制（報告要寫）**：逃跑模型是我們設計的簡化模型，不代表真實車輛或行人；影片場景的目標不會反應，只能展示預測攔截 → 抓拍。
 
 ## 架構（對應規格 §10）
 

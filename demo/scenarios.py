@@ -14,6 +14,8 @@ class Scenario:
     duration_s: float
     commands: List[Tuple[float, str]] = field(default_factory=list)
     reencircle_from_s: Optional[float] = None  # 量「從這個時間起，多久重新完成包圍」（例如恢復指令的時間）
+    target: str = "rabbit"  # rabbit：不理無人機的兔子；evader：會逃的目標（策略場景，無人機速度用 A 的 3 m/s）
+    strategy: str = "encircle"  # 規則式沒有操作員指令時的預設策略
 
 
 SCENARIOS: Dict[str, Scenario] = {
@@ -29,5 +31,10 @@ SCENARIOS: Dict[str, Scenario] = {
             reencircle_from_s=60.0,
         ),
         Scenario("return_home", "包圍 → 返航：返航後 Agent 不得再改變計畫", 75.0, [(15.0, "三架一起把那台車包圍起來"), (50.0, "請返航")]),
+        # 策略場景：同一個會逃的目標，比較不同捕捉策略（報告「策略比較」）
+        Scenario("evader_encircle", "會逃的目標，預設策略包圍（對照組）", 120.0, target="evader", strategy="encircle"),
+        Scenario("evader_capture", "會逃的目標，預設策略驅趕 → 抓拍", 120.0, target="evader", strategy="capture"),
+        Scenario("command_capture", "會逃的目標，第 10 秒下令「把那台車趕進捕捉區抓拍」（測 Agent 能否把自然語言轉成捕捉策略）",
+                 120.0, [(10.0, "把那台車趕進捕捉區抓拍")], target="evader"),
     )
 }

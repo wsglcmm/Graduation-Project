@@ -4,6 +4,7 @@
     python -m demo.run --planner llm            # 接 LLM（預設 Gemini，需要 .env 裡的 GEMINI_API_KEY）
     python -m demo.run --headless --duration 90 # 不開視窗，跑完輸出指標（報告用）
     python -m demo.run --cmd "15=三架一起把那台車包圍起來"  # 第 15 秒自動送出指令（可重複，報告用可重現）
+    python -m demo.run --target evader --strategy capture   # 策略場景：會逃的目標 + 驅趕 → 抓拍（無人機 3 m/s）
 
 畫面左邊是鳥瞰圖：彩色三角形 = 無人機（半透明框 = 相機視野），灰色 × = 兔子真值，
 黑點與圓圈 = 融合 + 卡爾曼後的估計與 uncertainty_m，小空心圓 = 隊形規劃給的目標點。
@@ -26,23 +27,30 @@ from typing import List, Tuple
 from coord_transform.config import load_camera_config, load_error_model
 from demo.engine import DemoEngine
 from llm_agent.commander import Commander
-from sim2d import RabbitConfig
+from sim2d import EvaderConfig, RabbitConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 COLORS = {"uav1": "#2a78d6", "uav2": "#eb6834", "uav3": "#1baf7a"}  # 類別色（已驗證的色盲安全順序）
-ROLE_ZH = {"chaser": "追擊", "blocker_left": "左翼", "blocker_right": "右翼", "overwatch": "高空監看", "searcher": "搜尋", "idle": "待命"}
-MODE_ZH = {"search": "搜尋", "track": "追蹤", "encircle": "包圍", "hold": "懸停", "return_home": "返航"}
+ROLE_ZH = {"chaser": "追擊", "blocker_left": "左翼", "blocker_right": "右翼", "overwatch": "高空監看", "searcher": "搜尋", "idle": "待命",
+           "herder": "驅趕", "capturer": "抓拍", "blocker": "封鎖"}
+MODE_ZH = {"search": "搜尋", "track": "追蹤", "encircle": "包圍", "capture": "驅趕抓拍", "hold": "懸停", "return_home": "返航"}
 STATUS_ZH = {"tracking": "追蹤中", "predicted": "暫時看不到（外推中）", "lost": "遺失"}
 
 
-def make_commander(planner: str, period_s: float) -> Commander:
+def make_commander(planner: str, period_s: float, strategy: str = "encircle") -> Commander:
+    """strategy：規則式在沒有操作員指令時的預設策略（LLM 模式時只影響失效時的規則式備援）。"""
     ids = ["uav1", "uav2", "uav3"]
     if planner == "rule":
-        return Commander(ids, llm=None, period_s=period_s)
+        return Commander(ids, llm=None, period_s=period_s, strategy=strategy)
     from llm_agent.llm_client import create_llm_client, load_dotenv
 
     load_dotenv(ROOT / ".env")
-    return Commander(ids, llm=create_llm_client(), period_s=period_s)  # AGENT_PROVIDER：gemini（預設）/ anthropic
+    return Commander(ids, llm=create_llm_client(), period_s=period_s, strategy=strategy)  # AGENT_PROVIDER：gemini（預設）/ anthropic
+
+
+def capture_line(c) -> str:
+    who = f"{c.drone_id}（{ROLE_ZH.get(c.role, c.role or '—')}）"
+    return f"[{c.t_s:5.1f}s] ★ 抓拍成功：{who} 目標在畫面中央（偏移 {c.pixel_offset[0]:+.0f}, {c.pixel_offset[1]:+.0f} px，約 {c.target_px:.0f} px）"
 
 
 def event_line(ev) -> str:
@@ -102,6 +110,8 @@ def run_headless(engine: DemoEngine, duration_s: float, realtime: bool, scripted
         feed_scripted(engine, scripted)
         for ev in engine.step():
             print(event_line(ev))
+        for cap in engine.new_captures:
+            print(capture_line(cap))
         if realtime:  # LLM 模式要照真實時間跑，延遲才有意義
             time.sleep(max(0.0, engine.dt - (time.monotonic() - t0)))
     engine.commander.wait_idle()
@@ -139,6 +149,8 @@ def run_gui(engine: DemoEngine, speed: float, scripted: List[Tuple[float, str]])
     (est_pt,) = ax.plot([], [], "o", color="#0b0b0b", markersize=6, label="估計位置")
     unc = Circle((0, 0), 1, fill=False, color="#0b0b0b", linewidth=1, linestyle="--")
     ax.add_patch(unc)
+    zone_art = Circle((0, 0), 1, fill=True, alpha=0.12, color="#b4380b", visible=False, label="捕捉區")
+    ax.add_patch(zone_art)
     drone_art, fov_art, goal_art = {}, {}, {}
     for did, col in COLORS.items():
         (drone_art[did],) = ax.plot([], [], marker=(3, 0, 0), markersize=14, color=col, linestyle="none", label=did)
@@ -154,6 +166,8 @@ def run_gui(engine: DemoEngine, speed: float, scripted: List[Tuple[float, str]])
             feed_scripted(engine, scripted)
             for ev in engine.step():
                 lines.insert(0, event_line(ev))
+            for cap in engine.new_captures:
+                lines.insert(0, capture_line(cap))
         del lines[9:]
         tn, te = engine.truth
         trail_x.append(te)
@@ -169,6 +183,10 @@ def run_gui(engine: DemoEngine, speed: float, scripted: List[Tuple[float, str]])
             drone_art[d.drone_id].set_data([d.e], [d.n])
             drone_art[d.drone_id].set_marker((3, 0, -math.degrees(d.yaw_rad)))
             fov_art[d.drone_id].set_xy([(e, n) for n, e in engine.view.footprint_corners(d)])
+        zone = engine.planner.capture_zone
+        zone_art.set_visible(zone is not None)
+        if zone is not None:
+            zone_art.center, zone_art.radius = (zone.e, zone.n), zone.radius_m
         for g in engine.goals:
             gp = g["position_world_ned_m"]
             goal_art[g["drone_id"]].set_data([gp["e"]], [gp["n"]])
@@ -193,7 +211,8 @@ def run_gui(engine: DemoEngine, speed: float, scripted: List[Tuple[float, str]])
         panel.text(0, 0.92, "\n".join(lines) or "（等待第一個計畫）", fontsize=9, va="top", linespacing=1.45)
         m = engine.summary()
         enc = f"{m['time_to_encircle_s']:.1f} s" if m["time_to_encircle_s"] else "尚未"
-        panel.text(0, 0.02, f"包圍完成：{enc}　視野內比例：{m['visible_fraction']:.0%}　最小機間距離：{m['min_drone_distance_m']:.1f} m",
+        cap = f"{m['time_to_capture_s']:.1f} s" if m["time_to_capture_s"] else "尚未"
+        panel.text(0, 0.02, f"抓拍：{cap}　包圍完成：{enc}　視野內比例：{m['visible_fraction']:.0%}　最小機間距離：{m['min_drone_distance_m']:.1f} m",
                    fontsize=9, color="#52514e")
 
     anim = FuncAnimation(fig, update, interval=int(engine.dt * 1000), cache_frame_data=False)
@@ -237,16 +256,24 @@ def main(argv=None):
     ap.add_argument("--fleet", choices=("sim", "sitl"), default="sim",
                     help="sim = 內建替身；sitl = 連 A 的 3 架 SITL（agent_server，或 python -m fleet_link.fake_server）")
     ap.add_argument("--uri", default="ws://127.0.0.1:8765", help="A 的 agent_server 位址（--fleet sitl 時使用）")
+    ap.add_argument("--target", choices=("rabbit", "evader"), default="rabbit",
+                    help="rabbit = 不理無人機的兔子路線；evader = 會逃的目標（策略場景，驅趕才有意義）")
+    ap.add_argument("--strategy", choices=("encircle", "capture"), default="encircle", help="規則式的預設策略：包圍 / 驅趕抓拍")
+    ap.add_argument("--drone-speed", type=float, default=None,
+                    help="替身無人機速度上限 m/s（預設：evader 時 3，對齊 A 的 SITL；rabbit 時 8）")
     args = ap.parse_args(argv)
 
     cam = load_camera_config(ROOT / "config" / "camera.yaml")
     err = load_error_model(ROOT / "config" / "error_model.yaml")
     scripted = parse_scripted(args.cmd)
-    commander = make_commander(args.planner, args.period)
+    commander = make_commander(args.planner, args.period, args.strategy)
     link, fleet = None, None
     if args.fleet == "sitl":
         link, fleet = connect_sitl(args.uri, commander)
-    engine = DemoEngine(cam, err, commander, rabbit=RabbitConfig(seed=args.seed), seed=args.seed, fleet=fleet)
+    evader = EvaderConfig(seed=args.seed) if args.target == "evader" else None
+    speed = args.drone_speed or (3.0 if evader is not None else None)
+    engine = DemoEngine(cam, err, commander, rabbit=RabbitConfig(seed=args.seed), seed=args.seed, fleet=fleet,
+                        evader=evader, drone_max_speed_mps=speed)
     try:
         if args.headless:
             run_headless(engine, args.duration, realtime=args.planner == "llm" or link is not None, scripted=scripted)

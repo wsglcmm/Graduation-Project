@@ -1,12 +1,13 @@
 """Demo 的核心迴圈（不含畫面），方便測試與無畫面執行。
 
 每一步（預設 0.1 s，10 Hz）：
-    1. 兔子移動（之後改成：B 的影片偵測 + 地面標定）
+    1. 目標移動：兔子（不理無人機）或會逃的目標（策略場景）；影片場景改成 B 的偵測 + 地面標定
     2. 每架依視野判斷看不看得到，產生帶誤差的觀測       fusion.visibility
     3. 多機觀測融合 → 卡爾曼濾波 → FusedTarget          fusion.fuse / fusion.kalman
     4. 指揮官決定要不要問 Agent（背景執行，不阻塞）      llm_agent.commander
     5. 依目前計畫算各機目標點                           planner.formation
-    6. 無人機替身追目標點（之後換成 A 的 3 架 SITL）     sim2d.fleet_sim
+    6. 無人機替身追目標點（或 A 的 3 架 SITL）            sim2d.fleet_sim / fleet_link
+    7. 裁判：抓拍判定、目標是否進入捕捉區                demo.capture_judge
 """
 import math
 from dataclasses import dataclass, field
@@ -17,9 +18,10 @@ import numpy as np
 from coord_transform.config import CameraConfig
 from coord_transform.uncertainty import ErrorModel
 from fusion import TargetTracker, ViewModel, fuse
+from demo.capture_judge import CaptureCriteria, CaptureJudge
 from llm_agent.commander import Commander
-from planner import FormationConfig, FormationPlanner
-from sim2d import FleetSim, RabbitConfig, RabbitPath
+from planner import CaptureConfig, FormationConfig, FormationPlanner
+from sim2d import Evader, EvaderConfig, FleetSim, FleetSimConfig, RabbitConfig, RabbitPath
 
 DEFAULT_START = {"uav1": (-30.0, -20.0, 25.0), "uav2": (-30.0, 0.0, 30.0), "uav3": (-30.0, 20.0, 35.0)}
 S = 1_000_000_000
@@ -51,6 +53,8 @@ class Metrics:
     encircled_steps: int = 0
     encircle_onsets_s: List[float] = field(default_factory=list)  # 每次從「沒包圍」變成「包圍」的時間
     _was_encircled: bool = False
+    captures: List[dict] = field(default_factory=list)  # CaptureEvent.to_dict()
+    zone_entered_at_s: Optional[float] = None  # 目標第一次進入捕捉區（驅趕成功）
 
     def summary(self, commander: Commander, sim: FleetSim) -> dict:
         evs = commander.events
@@ -71,6 +75,11 @@ class Metrics:
             "llm_latency_ms_mean": float(np.mean(lat)) if lat else None,
             "llm_latency_ms_p95": float(np.percentile(lat, 95)) if lat else None,
             "min_drone_distance_m": sim.min_pair_distance_m,
+            "time_to_capture_s": self.captures[0]["t_s"] if self.captures else None,
+            "time_to_capture_by_capturer_s": next((c["t_s"] for c in self.captures if c["role"] == "capturer"), None),
+            "captures": len(self.captures),
+            "zone_entered_at_s": self.zone_entered_at_s,
+            "capture_events": list(self.captures),
         }
 
 
@@ -91,19 +100,26 @@ def is_encircled(drones, tn: float, te: float, radius: float) -> bool:
 
 class DemoEngine:
     def __init__(self, cam: CameraConfig, err: ErrorModel, commander: Commander, rabbit: RabbitConfig = RabbitConfig(),
-                 start=None, seed: int = 0, dt: float = 0.1, fleet=None):
-        """fleet：機隊後端，介面同 sim2d.FleetSim。None = 用 FleetSim 替身；接 A 的 SITL 時傳 fleet_link.SitlFleet。"""
+                 start=None, seed: int = 0, dt: float = 0.1, fleet=None, evader: Optional[EvaderConfig] = None,
+                 drone_max_speed_mps: Optional[float] = None, capture_criteria: CaptureCriteria = CaptureCriteria()):
+        """fleet：機隊後端，介面同 sim2d.FleetSim。None = 用 FleetSim 替身；接 A 的 SITL 時傳 fleet_link.SitlFleet。
+        evader：給了就用會逃的目標（策略場景），否則用 rabbit 路線。
+        drone_max_speed_mps：替身的速度上限（策略比較時設成 A 的 3 m/s 才公平）；SITL 後端以 A 為準。"""
         start = start or (fleet.start_positions() if fleet is not None else DEFAULT_START)
         self.dt, self.t_ns = dt, 0
         self.rng = np.random.default_rng(seed)
         self.view = ViewModel(cam, err)
-        self.rabbit = RabbitPath(rabbit)
+        self.rabbit = Evader(evader) if evader is not None else RabbitPath(rabbit)
         self.tracker = TargetTracker(1, "car")
         self.commander = commander
-        cap = getattr(fleet, "max_speed_mps", None)  # A 的速度上限（SitlFleet 提供）；目標點不要求超過它
-        cfg = FormationConfig(max_speed_mps=cap) if cap else FormationConfig()
+        cap = getattr(fleet, "max_speed_mps", None) or drone_max_speed_mps  # 目標點不要求超過速度上限
+        capture = CaptureConfig(arena_radius_m=min(self.rabbit.cfg.arena_radius_m, 60.0))
+        cfg = FormationConfig(max_speed_mps=cap, capture=capture) if cap else FormationConfig(capture=capture)
         self.planner = FormationPlanner(home={k: (v[0], v[1]) for k, v in start.items()}, cfg=cfg)
-        self.sim = fleet if fleet is not None else FleetSim(start)
+        sim_cfg = FleetSimConfig(max_speed_mps=drone_max_speed_mps) if drone_max_speed_mps else FleetSimConfig()
+        self.sim = fleet if fleet is not None else FleetSim(start, sim_cfg)
+        self.judge = CaptureJudge(cam, capture_criteria)
+        self.new_captures: list = []
         self.metrics = Metrics()
         self.target_state: Optional[dict] = None
         self.goals: List[dict] = []
@@ -113,8 +129,8 @@ class DemoEngine:
     def step(self) -> list:
         """前進一步，回傳這一步新的 AgentEvent。"""
         self.t_ns += int(self.dt * S)
-        self.truth = self.rabbit.step(self.dt)
         drones = self.sim.states()
+        self.truth = self.rabbit.step(self.dt, drones)
         self.observations = self.view.observe(drones, 1, *self.truth, self.rng)
         fused = fuse(self.observations)
         self.target_state = self.tracker.step(self.t_ns, fused[0] if fused else None)
@@ -124,6 +140,9 @@ class DemoEngine:
             self.goals = self.planner.goal_points(self.commander.current, self.commander.current_id, drones, targets, self.t_ns)
             self.sim.apply_goals(self.goals, self.t_ns)
         self.sim.step(self.dt, self.t_ns)
+        plan = self.commander.current
+        roles = {a.drone_id: a.role for a in plan.assignments} if plan else {}
+        self.new_captures = self.judge.update(self.t_ns, self.sim.states(), roles, *self.truth)
         self._update_metrics()
         return events
 
@@ -139,6 +158,10 @@ class DemoEngine:
             m.status_steps[st] += 1
         else:
             m.status_steps["none"] += 1
+        m.captures.extend(c.to_dict() for c in self.new_captures)
+        zone = self.planner.capture_zone
+        if zone is not None and m.zone_entered_at_s is None and zone.contains(*self.truth):
+            m.zone_entered_at_s = self.t_ns / S
         plan = self.commander.current
         r = plan.formation.radius_m if plan else 15.0
         now = is_encircled(self.sim.states(), *self.truth, r)
