@@ -201,6 +201,29 @@ def run_gui(engine: DemoEngine, speed: float, scripted: List[Tuple[float, str]])
     plt.show()
 
 
+SITL_HINT = ("檢查：(1) 用假伺服器測試時，要先在另一個終端機執行 python -m fleet_link.fake_server 並保持開著；"
+             "(2) 連 A 的 SITL 時，A 的 agent_server 要先啟動，SSH 通道（-L 8765:127.0.0.1:8765）要建立且視窗不能關；"
+             "(3) --uri 是否正確")
+
+
+def connect_sitl(uri: str, commander: Commander):
+    """連 A 的 agent_server 並確認 3 架都在空中。失敗時印一行原因 + 檢查清單後結束，不印 traceback。"""
+    from fleet_link import FleetLink, LinkError, SitlFleet
+
+    link = None
+    try:
+        link = FleetLink(uri).start()
+        fleet = SitlFleet(link)
+        fleet.ensure_airborne(commander.drone_ids)
+    except LinkError as e:
+        if link is not None:
+            link.close()
+        commander.close()
+        raise SystemExit(f"\n[連線失敗] {e}\n{SITL_HINT}") from None
+    print(f"已連上 {uri}：{', '.join(s.drone_id for s in fleet.states())}", flush=True)
+    return link, fleet
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="多機包圍 Demo（鳥瞰圖 + Agent 指令面板）")
     ap.add_argument("--planner", choices=("rule", "llm"), default="rule")
@@ -222,12 +245,7 @@ def main(argv=None):
     commander = make_commander(args.planner, args.period)
     link, fleet = None, None
     if args.fleet == "sitl":
-        from fleet_link import FleetLink, SitlFleet
-
-        link = FleetLink(args.uri).start()
-        fleet = SitlFleet(link)
-        fleet.ensure_airborne(commander.drone_ids)
-        print(f"已連上 {args.uri}：{', '.join(s.drone_id for s in fleet.states())}", flush=True)
+        link, fleet = connect_sitl(args.uri, commander)
     engine = DemoEngine(cam, err, commander, rabbit=RabbitConfig(seed=args.seed), seed=args.seed, fleet=fleet)
     try:
         if args.headless:

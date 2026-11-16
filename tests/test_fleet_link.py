@@ -137,3 +137,16 @@ def test_demo_engine_runs_on_sitl_backend(link):
     assert link.stats.goals_sent > 0 and link.stats.rejected == 0
     assert all("上限" not in r for r in link.stats.last_reason.values())
     assert fleet.min_pair_distance_m >= 5.0
+
+
+def test_demo_run_sitl_connect_failure_exits_without_traceback():
+    """demo.run --fleet sitl 連不上時：一行原因 + 檢查清單，用 SystemExit 結束（不是 traceback）。"""
+    from demo.run import main
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    with pytest.raises(SystemExit) as ei:
+        main(["--fleet", "sitl", "--uri", f"ws://127.0.0.1:{port}", "--headless", "--duration", "1"])
+    msg = str(ei.value)
+    assert "[連線失敗]" in msg and "fake_server" in msg and "SSH" in msg
