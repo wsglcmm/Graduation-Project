@@ -138,6 +138,43 @@ def start_terminal_input(engine: DemoEngine) -> None:
     print("可以在這個終端機輸入指令（支援中文），按 Enter 送出；關閉視窗結束。", flush=True)
 
 
+def load_video_scene(args):
+    """影片場景：讀地面標定與 B 的偵測，回傳（VideoTarget 或 None、給網頁的影片資訊、標定檔存檔位置）。"""
+    import numpy as np
+
+    from coord_transform.homography import GroundHomography, load_video_ground
+    from demo.video_scene import load_video_target
+
+    vdir = Path(args.video)
+    video_id = vdir.name
+    ground_path = Path(args.ground) if args.ground else ROOT / "config" / f"video_ground_{video_id}.json"
+    det = vdir / "detections.jsonl"
+    if args.calibrate:
+        if not args.video_file:
+            raise SystemExit("--calibrate 需要 --video-file（背景影片）")
+        args.web = True
+        return None, None, ground_path
+    if not det.exists():
+        raise SystemExit(f"找不到 {det}（B 的偵測輸出）")
+    first = json.loads(det.read_text(encoding="utf-8").splitlines()[0])
+    if ground_path.exists():
+        ground, provisional = load_video_ground(ground_path), False
+    elif args.ground_scale:  # 暫定：畫面中心為原點、北朝上，只為了先看流程
+        center = (first.get("image_width", 1920) / 2, first.get("image_height", 1080) / 2)
+        ground, provisional = GroundHomography.from_scale(args.ground_scale, center, video_id=video_id), True
+    else:
+        raise SystemExit(f"找不到地面標定檔 {ground_path}。先用標定工具：python -m demo.run --video {vdir} "
+                         f"--video-file <影片.mp4> --calibrate，或暫時加 --ground-scale 0.05 只看流程")
+    target, tracks, provisional_ids = load_video_target(det, ground, args.video_track)
+    print(f"影片場景：{video_id}，{len(tracks)} 條軌跡，目標 #{target.track.track_id}（{target.track.cls}，"
+          f"{target.track.duration_s:.0f} s）" + ("；track_id 為 C 的暫代關聯" if provisional_ids else "")
+          + ("；地面標定為暫定值" if provisional else ""), flush=True)
+    info = {"src": "/video", "video_id": video_id, "width": first["image_width"], "height": first["image_height"],
+            "ground_to_pixel": np.linalg.inv(ground.H).tolist(), "track_id": target.track.track_id,
+            "provisional_ids": provisional_ids, "provisional_ground": provisional} if args.video_file else None
+    return target, info, ground_path
+
+
 def print_step_events(engine: DemoEngine) -> None:
     """把這一步新的事件印在終端機（網頁模式也同時保留文字紀錄）。"""
     for ev in engine.commander.events[-1:]:
@@ -322,13 +359,24 @@ def main(argv=None):
                     help="A 的速度上限 m/s（--fleet sitl 時使用），要和 A 的 agent_server --max-speed 相同")
     ap.add_argument("--target", choices=("rabbit", "evader"), default="rabbit",
                     help="rabbit = 不理無人機的兔子路線；evader = 會逃的目標（策略場景，驅趕才有意義）")
-    ap.add_argument("--strategy", choices=("encircle", "capture"), default="encircle", help="規則式的預設策略：包圍 / 驅趕抓拍")
+    ap.add_argument("--strategy", choices=("encircle", "capture"), default=None,
+                    help="規則式的預設策略：包圍 / 驅趕抓拍（預設 encircle；--video 時預設 capture）")
     ap.add_argument("--drone-speed", type=float, default=None,
                     help="替身無人機速度上限 m/s（預設：evader 時 3，對齊 A 的 SITL；rabbit 時 8）")
     ap.add_argument("--web", action="store_true", help="網頁版 Demo 畫面（即時指令翻譯、角色卡片、動作日誌），瀏覽器開 http://127.0.0.1:8000/")
     ap.add_argument("--port", type=int, default=8000, help="--web 的埠")
     ap.add_argument("--no-browser", action="store_true", help="--web 時不要自動開瀏覽器")
+    ap.add_argument("--video", default=None, metavar="資料夾",
+                    help="影片場景：B 的偵測資料夾（內含 detections.jsonl），例如 data/videos/road01；目標改用影片中的車")
+    ap.add_argument("--video-file", default=None, help="背景影片 mp4（--web 時疊圖用），例如 \"data/videos/road 01_1080p50.mp4\"")
+    ap.add_argument("--ground", default=None, help="地面標定檔（預設 config/video_ground_<影片資料夾名>.json）")
+    ap.add_argument("--ground-scale", type=float, default=None, metavar="m/px",
+                    help="沒有標定檔時暫用的比例（只看流程，距離不準，畫面會標示「暫定」）")
+    ap.add_argument("--video-track", type=int, default=None, help="指定影片中當目標的 track_id（預設：真的在移動的時間最長的車）")
+    ap.add_argument("--calibrate", action="store_true", help="開地面標定工具（需要 --video 與 --video-file）")
     args = ap.parse_args(argv)
+    if args.strategy is None:
+        args.strategy = "capture" if args.video else "encircle"  # 影片場景的重點是預測攔截 → 抓拍
 
     cam = load_camera_config(ROOT / "config" / "camera.yaml")
     err = load_error_model(ROOT / "config" / "error_model.yaml")
@@ -339,15 +387,28 @@ def main(argv=None):
         link, fleet = connect_sitl(args.uri, commander, args.max_speed)
     evader = EvaderConfig(seed=args.seed) if args.target == "evader" else None
     speed = args.drone_speed or (3.0 if evader is not None else None)
+    video_target, video_info, capture_cfg, ground_out = None, None, None, None
+    if args.video:
+        video_target, video_info, ground_out = load_video_scene(args)
+        if video_target is not None:
+            from planner.capture import CaptureConfig
+
+            # 影片目標不會逃、也趕不動：捕捉區放在它前進的方向，轉彎時每 3 s 重新預測（預測攔截）
+            capture_cfg = CaptureConfig(zone_direction="velocity", replan_zone_s=3.0)
+            speed = args.drone_speed or 5.0
     engine = DemoEngine(cam, err, commander, rabbit=RabbitConfig(seed=args.seed), seed=args.seed, fleet=fleet,
-                        evader=evader, drone_max_speed_mps=speed)
+                        evader=evader, drone_max_speed_mps=speed, target_source=video_target, capture_cfg=capture_cfg)
+    if video_info is not None:
+        video_info["speed"] = 1.0 if link is not None else args.speed
     try:
         if args.web:
             from demo.web import run_web
 
             run_web(engine, 1.0 if link is not None else args.speed, scripted, port=args.port,
                     backend="sitl" if link is not None else "sim", link=link, open_browser=not args.no_browser,
-                    on_step=print_step_events, duration_s=args.duration if args.headless else None)
+                    on_step=print_step_events, duration_s=args.duration if args.headless else None, video=video_info,
+                    video_file=args.video_file, ground_out=ground_out,
+                    path=f"/calibrate?video_id={Path(args.video).name}" if args.calibrate else "/")
         elif args.headless:
             llm_used = args.planner == "llm" or (args.agents == "multi" and args.drone_planner == "llm")
             run_headless(engine, args.duration, realtime=llm_used or link is not None, scripted=scripted)
