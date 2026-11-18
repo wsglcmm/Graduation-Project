@@ -150,3 +150,46 @@ def test_demo_run_sitl_connect_failure_exits_without_traceback():
         main(["--fleet", "sitl", "--uri", f"ws://127.0.0.1:{port}", "--headless", "--duration", "1"])
     msg = str(ei.value)
     assert "[連線失敗]" in msg and "fake_server" in msg and "SSH" in msg
+
+
+# ---------- §10.8 執行狀態 ----------
+def test_ack_carries_flight_command_in_local_ned(link):
+    SitlFleet(link).ensure_airborne(IDS)
+    link.send_goals([gp("uav2", 10.0, 3.0, d=-30, yaw_rad=0.0)])
+    deadline = time.monotonic() + 3
+    while "uav2" not in link.last_flight_command and time.monotonic() < deadline:
+        time.sleep(0.02)
+    fc = link.last_flight_command["uav2"]
+    assert fc["mavsdk"] == "offboard.set_position_ned" and fc["frame"] == "local_ned"
+    assert (fc["north_m"], fc["east_m"], fc["down_m"]) == pytest.approx((18.0, 3.0, -30.0))  # uav2 出生點 (-8, 0)
+    assert fc["also_called"] == ["offboard.start"]
+
+
+def test_rejected_goal_has_no_flight_command(link):
+    link.send_goals([gp("uav1", 0, 0)])  # 還在地上 → 拒絕
+    deadline = time.monotonic() + 3
+    while "uav1" not in link.last_flight_command and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert link.last_flight_command["uav1"] is None
+
+
+def test_yield_events_track_who_yields_to_whom():
+    lk = FleetLink("ws://unused")
+    start = {"type": "Yield", "schema_version": "0.2.0", "event": "start", "drone_id": "uav3", "yield_to": "uav1",
+             "timestamp_ns": 183880000000, "action_id": "sw7_uav3", "from_alt_m": 30.0, "to_alt_m": 25.0, "direction": "down"}
+    lk._on_message(json.dumps(start))
+    assert lk.yielding() == {"uav3": "uav1"} and lk.stats.yields == 1
+    lk._on_message(json.dumps({**start, "event": "end", "reason": "landed", "to_alt_m": None}))
+    assert lk.yielding() == {} and len(lk.yield_log) == 2
+    lk._on_message(json.dumps({"type": "Yield", "event": "maybe", "drone_id": "uav1"}))  # 格式不對：計數後丟掉
+    assert lk.stats.bad_messages == 1 and len(lk.yield_log) == 2
+
+
+def test_action_results_counted_by_result():
+    lk = FleetLink("ws://unused")
+    ok = {"type": "ActionResult", "action_id": "mv_ok", "drone_id": "uav1", "action": "move_to", "agent_id": "agent_uav1",
+          "role": "tracker", "result": "succeeded", "why": "到達目標 1.5 m 內", "metrics": {"final_err_h_m": 0.4}}
+    lk._on_message(json.dumps(ok))
+    lk._on_message(json.dumps({**ok, "action_id": "mv_far", "result": "failed", "why": "逾時：沒有到達目標"}))
+    assert lk.stats.summary()["action_results"] == {"succeeded": 1, "failed": 1}
+    assert lk.action_log[0].metrics["final_err_h_m"] == 0.4

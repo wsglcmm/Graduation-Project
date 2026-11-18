@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from fusion import DroneState
 
-from .messages import FleetPose, GoalPointAck
+from .messages import ActionResult, FleetPose, GoalPointAck, YieldEvent
 
 DEFAULT_URI = "ws://127.0.0.1:8765"
 
@@ -49,6 +49,9 @@ class LinkStats:
     rejected: int = 0
     adjusted: int = 0
     heartbeats: int = 0
+    bad_messages: int = 0  # Yield / ActionResult 格式不對（計數後丟掉）
+    yields: int = 0  # 收到的讓路 start 次數（§10.8(c)）
+    action_results: Dict[str, int] = field(default_factory=dict)  # result → 次數（§10.8(b)）
     last_reason: Dict[str, str] = field(default_factory=dict)  # drone_id → 最近一次被修改或拒絕的原因
     rtt_ms: Deque[float] = field(default_factory=lambda: deque(maxlen=500))
 
@@ -57,6 +60,7 @@ class LinkStats:
         pct = lambda q: rtt[min(len(rtt) - 1, int(q * len(rtt)))] if rtt else None  # noqa: E731
         return {"poses": self.poses, "bad_poses": self.bad_poses, "goals_sent": self.goals_sent, "acks": self.acks,
                 "rejected": self.rejected, "adjusted": self.adjusted, "heartbeats": self.heartbeats,
+                "yields": self.yields, "action_results": dict(self.action_results), "bad_messages": self.bad_messages,
                 "ack_rtt_ms_p50": pct(0.5), "ack_rtt_ms_p99": pct(0.99), "last_reason": dict(self.last_reason)}
 
 
@@ -80,6 +84,11 @@ class FleetLink:
         self._last_send = 0.0
         self._sent_at: Deque[float] = deque(maxlen=200)  # 送出 GoalPoints 的時間，估 ack 來回延遲
         self._closing = False
+        # §10.8 執行狀態：只記錄，給動作日誌與面板用
+        self.last_flight_command: Dict[str, Optional[dict]] = {}  # drone_id → 最近一次 ack 的 flight_command
+        self.active_yields: Dict[str, YieldEvent] = {}  # drone_id → 進行中的讓路（start 還沒收到 end）
+        self.yield_log: Deque[YieldEvent] = deque(maxlen=500)
+        self.action_log: Deque[ActionResult] = deque(maxlen=500)
 
     # ---------- 連線 ----------
     def start(self) -> "FleetLink":
@@ -167,6 +176,10 @@ class FleetLink:
                         self._index[d["drone_id"]] = int(d["id"])
         elif t in ("GoalPointAck", "GoalPointAcks"):
             self._on_acks(m.get("acks", [m]) if t == "GoalPointAcks" else [m])
+        elif t == "Yield":
+            self._on_yield(m)
+        elif t == "ActionResult":
+            self._on_action_result(m)
         elif t == "reply":
             fut = self._pending.pop(m.get("id"), None)
             if fut is not None and not fut.done():
@@ -196,6 +209,38 @@ class FleetLink:
                 self.stats.adjusted += 1
             if a.reason and a.drone_id:
                 self.stats.last_reason[a.drone_id] = a.reason
+            if a.drone_id:
+                with self._lock:
+                    self.last_flight_command[a.drone_id] = a.flight_command
+
+    def _on_yield(self, m: dict) -> None:
+        try:
+            y = YieldEvent.model_validate(m)
+        except ValidationError:
+            self.stats.bad_messages += 1
+            return
+        with self._lock:
+            self.yield_log.append(y)
+            if y.event == "start":
+                self.active_yields[y.drone_id] = y
+                self.stats.yields += 1
+            else:
+                self.active_yields.pop(y.drone_id, None)
+
+    def _on_action_result(self, m: dict) -> None:
+        try:
+            r = ActionResult.model_validate(m)
+        except ValidationError:
+            self.stats.bad_messages += 1
+            return
+        with self._lock:
+            self.action_log.append(r)
+        self.stats.action_results[r.result] = self.stats.action_results.get(r.result, 0) + 1
+
+    def yielding(self) -> Dict[str, Optional[str]]:
+        """目前正在讓路的無人機 → 讓給誰（面板的「誰在讓誰」）。"""
+        with self._lock:
+            return {k: v.yield_to for k, v in self.active_yields.items()}
 
     # ---------- 對外 API（同步） ----------
     def poses(self) -> Dict[str, PoseRecord]:

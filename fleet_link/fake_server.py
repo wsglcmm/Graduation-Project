@@ -58,6 +58,7 @@ class _Drone:
     goal: Optional[Tuple[float, float, float]] = None  # n, e, speed
     goal_yaw: Optional[float] = None
     goal_t: float = 0.0
+    offboard_started: bool = False  # 模仿 A：第一次切進 Offboard 時 flight_command 多一個 also_called
 
 
 class FakeFleet:
@@ -78,7 +79,7 @@ class FakeFleet:
         c = self.cfg
         ack = {"schema_version": "0.2.0", "plan_id": g.get("plan_id"), "drone_id": g.get("drone_id"),
                "timestamp_ns": g.get("timestamp_ns"), "accepted": False, "adjusted": False, "reason": None,
-               "applied_position_world_ned_m": None}
+               "applied_position_world_ned_m": None, "flight_command": None}
         d = self.by_id.get(g.get("drone_id"))
         p = g.get("position_world_ned_m") or {}
         vals = [p.get(k) for k in ("n", "e", "d")]
@@ -122,8 +123,17 @@ class FakeFleet:
             sp = c.max_speed_mps
         d.goal, d.goal_yaw, d.goal_t = (n, e, sp), g.get("yaw_rad"), time.monotonic()
         d.mode, d.failsafe_reason = "agent", None
+        # §10.8(a)：A 實際呼叫的 MAVSDK 函式（座標是那架自己的 local NED，原點 = 出生點）
+        fc = {"mavsdk": "offboard.set_position_ned", "arg": "PositionNedYaw", "frame": "local_ned",
+              "frame_origin_world_ned_m": list(d.origin), "north_m": round(n - d.origin[0], 3),
+              "east_m": round(e - d.origin[1], 3), "down_m": -d.layer,
+              "yaw_deg": round(math.degrees(d.goal_yaw if d.goal_yaw is not None else d.yaw), 1),
+              "rate_hz": 20.0, "max_speed_mps": sp}
+        if not d.offboard_started:
+            fc["also_called"] = ["offboard.start"]
+            d.offboard_started = True
         ack.update(accepted=True, adjusted=bool(reasons), reason="；".join(reasons) or None,
-                   applied_position_world_ned_m={"n": n, "e": e, "d": -d.layer})
+                   applied_position_world_ned_m={"n": n, "e": e, "d": -d.layer}, flight_command=fc)
         return ack
 
     # ---------- 指令 ----------
@@ -357,8 +367,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="模仿 A 的 agent_server（離線開發與測試用）")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--max-speed", type=float, default=3.0, help="同 A 的 agent_server --max-speed（m/s）")
+    ap.add_argument("--default-speed", type=float, default=2.5, help="同 A 的 --default-speed（m/s）")
     args = ap.parse_args(argv)
-    srv = FakeAServer(host=args.host, port=args.port).start()
+    cfg = FakeConfig(max_speed_mps=args.max_speed, default_speed_mps=args.default_speed)
+    srv = FakeAServer(cfg, host=args.host, port=args.port).start()
     print(f"[fake_server] {srv.uri}（模仿 A 的 agent_server；Ctrl+C 結束）", flush=True)
     try:
         while True:
