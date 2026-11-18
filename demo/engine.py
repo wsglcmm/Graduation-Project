@@ -10,6 +10,7 @@
     7. 裁判：抓拍判定、目標是否進入捕捉區                demo.capture_judge
     8. 動作日誌與驗證：Agent 動作 → 飛控指令 → A 的回覆 → 實際是否達成   ledger
 """
+import dataclasses
 import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -104,19 +105,24 @@ def is_encircled(drones, tn: float, te: float, radius: float) -> bool:
 class DemoEngine:
     def __init__(self, cam: CameraConfig, err: ErrorModel, commander: Commander, rabbit: RabbitConfig = RabbitConfig(),
                  start=None, seed: int = 0, dt: float = 0.1, fleet=None, evader: Optional[EvaderConfig] = None,
-                 drone_max_speed_mps: Optional[float] = None, capture_criteria: CaptureCriteria = CaptureCriteria()):
+                 drone_max_speed_mps: Optional[float] = None, capture_criteria: CaptureCriteria = CaptureCriteria(),
+                 target_source=None, capture_cfg: Optional[CaptureConfig] = None):
         """fleet：機隊後端，介面同 sim2d.FleetSim。None = 用 FleetSim 替身；接 A 的 SITL 時傳 fleet_link.SitlFleet。
         evader：給了就用會逃的目標（策略場景），否則用 rabbit 路線。
+        target_source：其他目標來源（例如影片場景的 demo.video_scene.VideoTarget），介面同 RabbitPath，優先於 evader / rabbit。
+        capture_cfg：捕捉策略參數（影片場景用 zone_direction = velocity：目標不會逃，捕捉區放在它前進的方向）。
         drone_max_speed_mps：替身的速度上限（策略比較時設成 A 的 3 m/s 才公平）；SITL 後端以 A 為準。"""
         start = start or (fleet.start_positions() if fleet is not None else DEFAULT_START)
         self.dt, self.t_ns = dt, 0
         self.rng = np.random.default_rng(seed)
         self.view = ViewModel(cam, err)
-        self.rabbit = Evader(evader) if evader is not None else RabbitPath(rabbit)
+        self.rabbit = target_source if target_source is not None else (Evader(evader) if evader is not None else RabbitPath(rabbit))
         self.tracker = TargetTracker(1, "car")
         self.commander = commander
         cap = getattr(fleet, "max_speed_mps", None) or drone_max_speed_mps  # 目標點不要求超過速度上限
-        capture = CaptureConfig(arena_radius_m=min(self.rabbit.cfg.arena_radius_m, 60.0))
+        capture = dataclasses.replace(capture_cfg or CaptureConfig(), arena_radius_m=min(self.rabbit.cfg.arena_radius_m, 60.0))
+        if getattr(commander, "capture_cfg", None) is None:
+            commander.capture_cfg = capture  # 規則式分派角色、各機 Agent 都用和規劃器同一份設定（Team 會轉給各機）
         cfg = FormationConfig(max_speed_mps=cap, capture=capture) if cap else FormationConfig(capture=capture)
         self.planner = FormationPlanner(home={k: (v[0], v[1]) for k, v in start.items()}, cfg=cfg)
         sim_cfg = FleetSimConfig(max_speed_mps=drone_max_speed_mps) if drone_max_speed_mps else FleetSimConfig()

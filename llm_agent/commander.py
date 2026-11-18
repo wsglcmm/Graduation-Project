@@ -62,6 +62,7 @@ class Commander:
     llm: Optional[object] = None  # 有 complete(system, messages) 的物件；None = 只用規則式
     period_s: float = 2.0
     strategy: str = "encircle"  # 沒有操作員指令時規則式用的預設策略：encircle / capture
+    capture_cfg: Optional[object] = None  # planner.capture.CaptureConfig；和規劃器用同一份，角色分派才會對上捕捉區
     clock: Callable[[], float] = time.monotonic  # 量測延遲用的牆鐘
     current: Optional[Plan] = None
     current_id: Optional[str] = None
@@ -231,7 +232,8 @@ class Commander:
 
     def _rule(self, t_ns, drones, targets, trig, cmd, note: Optional[str] = None, rule_cmd: Optional[str] = None) -> AgentEvent:
         start = self.clock()
-        plan = rule_plan(drones, targets, rule_cmd if rule_cmd is not None else cmd, strategy=self.strategy, previous=self.current)
+        plan = rule_plan(drones, targets, rule_cmd if rule_cmd is not None else cmd, strategy=self.strategy, previous=self.current,
+                         capture_cfg=self.capture_cfg)
         kw = dict(timestamp_ns=t_ns, trigger=trig, planner="rule", latency_ms=(self.clock() - start) * 1000, operator_command=cmd)
         ev = self._accept(plan, kw, has_target=any(t["status"] != "lost" for t in targets))
         if note:

@@ -63,7 +63,7 @@ def capture_assignment(drones: Sequence, tn: float, te: float, cfg: CaptureConfi
 
 
 def rule_plan(drones: Sequence, targets: Sequence[dict], operator_command: Optional[str] = None, radius_m: float = 15.0,
-              strategy: str = "encircle", previous: Optional[Plan] = None) -> Plan:
+              strategy: str = "encircle", previous: Optional[Plan] = None, capture_cfg: Optional[CaptureConfig] = None) -> Plan:
     """strategy：沒有操作員指令時的預設策略，encircle（包圍）或 capture（驅趕 → 抓拍）。
     previous：上一個計畫。同一個目標的 capture 進行中時沿用原本的角色，不要每次重算就換人
     （驅趕機和抓拍機一直交換，策略會完全失效；這是實測發現的問題）。"""
@@ -93,7 +93,9 @@ def rule_plan(drones: Sequence, targets: Sequence[dict], operator_command: Optio
             return Plan(mode="capture", target_id=tgt["target_id"], assignments=[a.model_dump() for a in previous.assignments],
                         formation={"radius_m": radius_m}, reason="捕捉進行中，維持原本的角色分工")
         reason = "驅趕機從後方把目標趕向捕捉區，抓拍機在捕捉區等、目標靠近時迎上去抓拍"
-        return Plan(mode="capture", target_id=tgt["target_id"], assignments=capture_assignment(drones, p["n"], p["e"], vel=_vel(tgt)),
+        if capture_cfg is not None and capture_cfg.replan_zone_s is not None:  # 影片場景：目標不會反應
+            reason = "目標不會理無人機：抓拍機預判它的前進方向先到攔截點，另外兩架跟在後方與側翼保持視野"
+        return Plan(mode="capture", target_id=tgt["target_id"], assignments=capture_assignment(drones, p["n"], p["e"], capture_cfg or CaptureConfig(), _vel(tgt)),
                     formation={"radius_m": radius_m}, reason=reason)
     mode = forced if forced in ("track", "encircle", "search") else ("encircle" if dist < ENCIRCLE_RANGE_FACTOR * radius_m else "track")
     if mode == "search":

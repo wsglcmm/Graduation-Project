@@ -30,6 +30,17 @@ class Team:
         self.drone_events: List[DroneAgentEvent] = []
         self.new_drone_events: List[DroneAgentEvent] = []
 
+    @property
+    def capture_cfg(self) -> Optional[CaptureConfig]:
+        return self.commander.capture_cfg
+
+    @capture_cfg.setter
+    def capture_cfg(self, cfg: CaptureConfig) -> None:
+        """協調 Agent 與各機 Agent 用同一份捕捉設定（DemoEngine 會設成和規劃器相同）。"""
+        self.commander.capture_cfg = cfg
+        for ag in self.agents.values():
+            ag.capture_cfg = cfg
+
     # ---- 和 Commander 相容的部分 ----
     @property
     def drone_ids(self):
