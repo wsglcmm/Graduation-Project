@@ -1,6 +1,6 @@
 # 模組介面規格（Interface Specification）
 
-- 版本：`0.2.3`（§10.6 機間安全距離改寫：3D ≥ 5 m、目標點推開 6 m；§2.4 參考點改為中心 + 半高平面；§10 多機與影片 Demo 介面：A 已於 2026-11-01 合併 PR #3，同意 §10.1 local ↔ world 由 A 轉換、§10.6 目標點逾時與安全距離；§10.3 影片 Detection 待 B 確認）
+- 版本：`0.2.4`（§10.8 新增 A → C 執行狀態：flight_command、ActionResult、Yield；§10.2 / §10.6 時間戳的時鐘；§10.6 速度上限改為啟動參數、地面站失聯行為；§10.6 機間安全距離改寫：3D ≥ 5 m、目標點推開 6 m；§2.4 參考點改為中心 + 半高平面；§10 多機與影片 Demo 介面：A 已於 2026-11-01 合併 PR #3，同意 §10.1 local ↔ world 由 A 轉換、§10.6 目標點逾時與安全距離；§10.3 影片 Detection 待 B 確認）
 - §3–§7 的單機訊息 `schema_version` 仍為 `"0.1.0"`；§10 的新訊息為 `"0.2.0"`
 - 維護者：C
 - 適用範圍：B（影像辨識）→ C（座標轉換 / LLM Agent）→ A（模擬 / 飛控）
@@ -393,11 +393,13 @@ LLM 不直接輸出底層控制量，只能從下列**白名單動作**中選擇
 |---|---|---|
 | `schema_version` | string | `"0.2.0"` |
 | `drone_id` | string | 哪一架 |
-| `timestamp_ns` | int64 | sim time（同 §2.2） |
+| `timestamp_ns` | int64 | PX4 的時間（SITL 跟 Gazebo 模擬時鐘走，是「模擬開始後經過的時間」，不是 Unix 時間），見下方說明 |
 | `position_world_ned_m` | object | `n, e, d`（world_ned） |
 | `attitude_rad` | object | `roll, pitch, yaw`（同 §4） |
 | `velocity_world_ned_mps` | object | 選填，`n, e, d` |
 | `status` | string | `"landed"` / `"flying"` / `"failsafe"` |
+
+**時間戳（A 2026-11-18 實測）**：SITL 中三架的 `timestamp_ns` 是同一個時鐘（Gazebo 模擬時鐘），比對 752 次同一輪推播，三架相差中位數 8 ms、最多 16 ms，可以直接跨機比較與內插。例：`80544000000` = 模擬第 80.544 s。實機上每架 PX4 從自己開機開始計時，到時候必須另外換算成共同時間。
 
 ### 10.3 影片來源 Detection（B → C）
 
@@ -462,7 +464,7 @@ LLM 只輸出下列 JSON，C 以 pydantic strict schema 驗證，不合法就丟
 | `schema_version` | string | `"0.2.0"` |
 | `plan_id` | string | 由哪一個計畫產生 |
 | `drone_id` | string | 給哪一架 |
-| `timestamp_ns` | int64 | 產生時間（sim time） |
+| `timestamp_ns` | int64 | 產生時間，**C 的時鐘**（Demo 引擎啟動後經過的時間）；A 在 ack 原樣放回。和 FleetPose 的 PX4 時間不同源，**兩者不能直接相減**，延遲請用各自的時鐘量 |
 | `position_world_ned_m` | object | `n, e, d`（world_ned） |
 | `yaw_rad` | float | 選填，期望航向（例如機頭朝向目標） |
 | `max_speed_mps` | float | 選填，不得超過 A 的速度上限 |
@@ -473,7 +475,10 @@ A 的責任（安全層最終生效）：
   - 高度分層 uav1 / uav2 / uav3 = 25 / 30 / 35 m（GoalPoint 的 `d` 一律改成該架的高度層）。不同層之間相差 5 m，所以飛行途中水平交錯時（水平距離可能只剩約 1 m），3D 距離仍滿足要求。
   - **目標點推開距離 6 m**（A 的安全層，2026-11-10 由 5 m 調整）：兩架目標點的水平距離 < 6 m 時，A 會把目標點推開到 6 m，比安全要求多留 1 m 餘裕（推開到 5 m 時實測飛到的距離只有 4.94 m）。
   - 修改目標點時，GoalPointAck 的 `adjusted = true`，`reason` 寫明改了什麼。
-- 其他安全處理（A 實作，2026-11-02）：飛行範圍 world_ned 北、東各 ±80 m（超出會夾到邊界）；`max_speed_mps` 上限 3 m/s（省略時 2.5 m/s）。
+- 其他安全處理（A 實作，2026-11-02）：飛行範圍 world_ned 北、東各 ±80 m（超出會夾到邊界）。
+- **速度上限是 A 的啟動參數**（2026-11-18）：`agent_server.py --max-speed 5 --default-speed 5`；預設仍是上限 3 m/s、省略 `max_speed_mps` 時 2.5 m/s。上限超過約 6 m/s 時（煞車距離大於 6 m 推開距離）啟動會印警告；8 m/s 以上要先加大推開距離與機間距離再使用。A 實測 5 m/s 同層對向交換約 16 s、邊界測試 36 項通過。C 的 `demo.run --fleet sitl --max-speed` 要設成和 A 相同。
+- **地面站（agent_server）失聯**（2026-11-18 改）：PX4 偵測到 Offboard 指令中斷後**原地懸停，30 s 沒恢復才原地降落**。原本是 PX4 自動直線返航，11/10 同層測試時兩架返航路線交叉、最近 0.59 m（見 §10.8 備註）。
+- **GoalPointAck**（A 對每一則 GoalPoint 的回覆）：`drone_id`、`plan_id`、`timestamp_ns`（原樣放回）、`accepted`、`adjusted`、`reason`、`applied_position_world_ned_m`，以及選填的 `flight_command`（實際呼叫的 MAVSDK 函式，格式見 §10.8）。
 - 地理圍欄（對應影片場景範圍）。
 
 ### 10.7 AgentEvent（C 內部，Agent 指令面板的每一筆紀錄）
@@ -493,6 +498,60 @@ A 的責任（安全層最終生效）：
 
 AgentEvent 只在 C 內部使用（面板與報告指標），A、B 不需要實作。
 
+### 10.8 執行狀態（A → C，2026-11-18 A 提供）
+
+用途：C 的動作日誌與面板要能證明「Agent 的動作確實對應到無人機的操作指令，而且有執行到」（老師 2026-11-16 的建議）。三種訊息都是 A 主動推播，所有連線都收得到；C 寬鬆解析（欄位可能增加）。
+
+**(a) `flight_command`：實際呼叫的 MAVSDK 函式**（放在 GoalPointAck 裡，選填）
+
+```json
+{"mavsdk": "offboard.set_position_ned", "arg": "PositionNedYaw", "frame": "local_ned",
+ "frame_origin_world_ned_m": [-8.0, 0.0, 0.0], "north_m": 7.321, "east_m": 0.038, "down_m": -30.0,
+ "yaw_deg": 91.8, "rate_hz": 20.0, "max_speed_mps": 2.5}
+```
+
+- A 每 0.05 s 呼叫一次 `offboard.set_position_ned`；座標是**那架自己的 local NED**（原點 = 出生點 `frame_origin_world_ned_m`），送出的是引導點，會以 `max_speed_mps` 往目標移動；ack 裡寫的是最後的目標。
+- 第一次切進 Offboard 時多一個 `"also_called": ["offboard.start"]`。
+- 讓路升降中，目標點先記下：`{"mavsdk": null, "deferred": "yield"}`。被拒絕時 `flight_command` 為 `null`。
+- ActionAck 也有 `flight_commands`（陣列，依呼叫順序）：
+  - `takeoff`：`action.set_takeoff_altitude` → `action.arm` → `action.takeoff` → `offboard.set_position_ned`
+  - `land`：`offboard.stop` → `action.land`
+  - `return_home`：`offboard.set_position_ned`（飛到出生點上方）→ `offboard.stop` → `action.land`
+
+**(b) `ActionResult`：動作結束時的結果**
+
+```json
+{"type": "ActionResult", "action_id": "mv_ok", "drone_id": "uav1", "action": "move_to", "agent_id": "agent_uav1",
+ "role": "tracker", "result": "succeeded", "why": "到達目標 1.5 m 內",
+ "metrics": {"duration_s": 4.99, "time_to_reach_s": 4.99, "final_err_h_m": 0.4, "final_err_v_m": 0.01}}
+```
+
+- `result`：`succeeded` / `failed` / `overridden` / `cancelled` / `rejected`。
+- `move_to`：水平 1.5 m 內、高度差 1 m 內算到達；超過時限還沒到判 `failed`（`why` 寫原因，例如「逾時：沒有到達目標」）。
+- `follow`、`encircle` 沒有「到達某一點」，在 ActionEnd 時結算追蹤誤差 `err_mean_m`、`err_p95_m`、`err_max_m`。
+- **C 對 GoalPoint 串流的驗證採用相同的到達標準**（水平 1.5 m、高度 1 m），兩邊的「動作驗證通過率」才可以比較。
+
+**(c) `Yield`：讓路事件**（日誌裡叫 `yield_start`、`yield_end`）
+
+```json
+{"type": "Yield", "schema_version": "0.2.0", "event": "start", "drone_id": "uav3", "yield_to": "uav1",
+ "timestamp_ns": 183880000000, "sim_time": 183.88, "action_id": "sw7_uav3",
+ "from_alt_m": 30.0, "to_alt_m": 25.0, "direction": "down", "other_waits": true}
+{"type": "Yield", "schema_version": "0.2.0", "event": "end", "drone_id": "uav3", "yield_to": "uav1",
+ "timestamp_ns": 193576000000, "sim_time": 193.576, "action_id": "sw7_uav3",
+ "from_alt_m": 25.0, "to_alt_m": 30.0, "reason": "back_to_layer"}
+```
+
+- 每個 `start` 之後一定有一個 `end`。`end` 的 `reason` 也可能是 `landed`（讓路中直接落地），這時 `to_alt_m` 為 `null`。
+- `timestamp_ns` 是 PX4 時間（同 FleetPose）。
+- 防撞分工：A 在正常飛行路線交叉時用**升降讓路**；C 的規劃器在送出前做**水平去衝突**（目標點 ≥ 6 m、飛行途中預測交錯時低優先權的角色橫移）。兩者可同時作用。
+
+**備註：11/10 的「互撞」（A 2026-11-18 說明）**：三架同在 30 m 的同層測試，故意關掉地面站；PX4 斷線 2 s 後自己以約 4.9 m/s 直線飛回出生點，uav1 與 uav3 的路線在 (2.5, 0) 附近交叉，第 6.6 s 最近 0.59 m（沒有碰撞，PX4 與 Gazebo 都沒記到碰撞，三架正常降落）。原因是「失聯 fallback 的返航路線」不經過任何防撞層，已改成上述原地懸停 → 30 s 後原地降落；同樣測試重做多次，最近約 14 m。
+
+**待確認**：
+- A 實測 5 m/s 上下錯開時 3D 最近 4.94 m，低於 §10.6「任何時刻 3D ≥ 5 m」6 cm，需要 A 決定是放寬容許誤差還是加大讓路距離。
+- §7 的 Action 請求格式還是初版（`follow`、`hover`、`search`…）；A 的實作已有 `move_to`、`follow`、`encircle`、`agent_id`、`role`（`tracker`、`guard`…），請 A 提供目前的 Action 請求格式後更新 §7，並和 C 的捕捉策略角色（`herder`、`capturer`、`blocker`）對齊。
+
 ---
 
 ## 11. 變更紀錄
@@ -506,3 +565,4 @@ AgentEvent 只在 C 內部使用（面板與報告指標），A、B 不需要實
 | 0.2.1 | 2026-11-01 | 標示確認狀態：A 合併 PR #3 同意 §10.1、§10.6；§10.3 待 B 確認。§10.7 補上 C 內部欄位 `operator_command`、`model`。§2.4 補上 EKF yaw 偏差的同次執行確認與原因（磁偏角）；§4 註明 SITL 的 `EKF2_GPS_DELAY` 須為 0。A、B 的訊息格式沒有變動 | C |
 | 0.2.2 | 2026-11-02 | §2.4、§5：相機模型流程的 bbox 參考點由「底邊中點」改為「中心 + 半高平面」（依 Phase 2 實驗 5：nadir 看車最大誤差 3.4 m → 0.1 m 以下）；影片 homography 流程維持底邊中點。A、B 的訊息格式沒有變動 | C |
 | 0.2.3 | 2026-11-11 | §10.6：機間安全距離改寫為「任何時刻 3D ≥ 5 m」，並記錄 A 的實作：目標點推開距離 6 m（11/10 由 5 m 調整）、高度分層、飛行範圍 ±80 m、速度上限 3 m/s。訊息格式沒有變動 | C |
+| 0.2.4 | 2026-11-18 | 依 A 11/18 回覆：§10.2 FleetPose 時間戳為 PX4 / 模擬時鐘（三架同源）、§10.6 GoalPoint 時間戳為 C 的時鐘（兩者不能相減）；§10.6 速度上限改為 A 的啟動參數、地面站失聯改為原地懸停 → 30 s 後原地降落、GoalPointAck 欄位；新增 §10.8 執行狀態（`flight_command`、`ActionResult`、`Yield`）與 11/10 近距離事件說明。C 依此新增解析，A 的既有訊息沒有破壞性變動 | A（C 代為整理） |
