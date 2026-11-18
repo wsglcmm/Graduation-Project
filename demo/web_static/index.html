@@ -28,6 +28,9 @@
               display: flex; align-items: center; gap: 8px; }
   #mapwrap { position: relative; flex: 1; min-height: 0; }
   #map { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #vid { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #111; display: none; }
+  #vidnote { position: absolute; left: 10px; bottom: 10px; background: rgba(255,255,255,.92); border-radius: 6px; padding: 4px 8px;
+             font-size: 12px; display: none; max-width: 70%; }
   #snapbox { position: absolute; right: 10px; top: 10px; width: 236px; background: rgba(255,255,255,.95); border: 1px solid var(--line);
              border-radius: 6px; padding: 6px; font-size: 12px; display: none; }
   #snapbox canvas { width: 224px; height: 168px; display: block; border-radius: 4px; }
@@ -92,7 +95,9 @@
 <section class="panel">
   <h2>鳥瞰圖　<span class="meta">北朝上；色塊 = 各機相機視野，橘色圓 = 捕捉區，紅點 = 目標估計（圈 = 誤差），灰 × = 目標真值</span></h2>
   <div id="mapwrap">
+    <video id="vid" muted playsinline preload="auto"></video>
     <canvas id="map"></canvas>
+    <div id="vidnote"></div>
     <div id="snapbox"><div id="snapcap" style="margin-bottom:4px"></div><canvas id="snap" width="448" height="336"></canvas></div>
   </div>
   <div id="metrics"></div>
@@ -165,13 +170,51 @@ function fitView(s) {
   view = {n: view.n + k * (want.n - view.n), e: view.e + k * (want.e - view.e), span: view.span + k * (want.span - view.span)};
   return view;
 }
+// ---------- 影片場景：背景影片 + 地面座標投影回像素的疊圖 ----------
+function syncVideo(s) {
+  const v = $("vid"), info = s.video;
+  v.style.display = info ? "block" : "none";
+  $("vidnote").style.display = info ? "block" : "none";
+  if (!info) return;
+  if (!v.getAttribute("src")) v.setAttribute("src", info.src);
+  if (v.readyState >= 1 && Math.abs(v.currentTime - info.t) > 0.3) v.currentTime = info.t;
+  v.playbackRate = info.speed || 1;
+  if (v.paused) v.play().catch(() => {});
+  $("vidnote").innerHTML = `影片 ${esc(info.video_id)}　目標軌跡 #${info.track_id}　影片時間 ${fmt(info.t)} s`
+    + (info.provisional_ids ? '　<b style="color:var(--warn)">track_id 為 C 的暫代關聯（B 的 ByteTrack 到了再換）</b>' : "")
+    + (info.provisional_ground ? '　<b style="color:var(--bad)">地面標定為暫定值，距離不準</b>' : "");
+}
+function drawVideoOverlay(s, g, W, H) {
+  const info = s.video, k = Math.min(W / info.width, H / info.height);
+  const x0 = (W - info.width * k) / 2, y0 = (H - info.height * k) / 2, M = info.ground_to_pixel;
+  const P = (n, e) => { const w = M[2][0] * n + M[2][1] * e + M[2][2];
+    return [x0 + k * (M[0][0] * n + M[0][1] * e + M[0][2]) / w, y0 + k * (M[1][0] * n + M[1][1] * e + M[1][2]) / w]; };
+  const poly = (pts, fill, stroke) => { g.beginPath(); pts.forEach(([n, e], i) => { const [x, y] = P(n, e); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    g.closePath(); if (fill) { g.fillStyle = fill; g.fill(); } if (stroke) { g.strokeStyle = stroke; g.lineWidth = 2; g.stroke(); } };
+  if (s.zone) { const z = s.zone, ring = [...Array(32).keys()].map((i) => [z.n + z.r * Math.cos(i * Math.PI / 16), z.e + z.r * Math.sin(i * Math.PI / 16)]);
+    poly(ring, "rgba(232,89,12,.22)", "rgba(232,89,12,.95)"); }
+  for (const d of s.drones) poly(d.fov, roleColor(d.role) + "22", roleColor(d.role) + "aa");
+  if (s.target) { const [x, y] = P(s.target.n, s.target.e); g.strokeStyle = "#ff3b3b"; g.lineWidth = 3;
+    g.beginPath(); g.arc(x, y, 14, 0, 2 * Math.PI); g.stroke(); g.fillStyle = "#ff3b3b"; g.font = "bold 14px sans-serif"; g.fillText("目標", x + 16, y + 5); }
+  for (const d of s.drones) {
+    const [x, y] = P(d.n, d.e), [hx, hy] = P(d.n + 4 * Math.cos(d.yaw), d.e + 4 * Math.sin(d.yaw)), c = roleColor(d.role);
+    const a = Math.atan2(hy - y, hx - x) + Math.PI / 2;
+    g.save(); g.translate(x, y); g.rotate(a); g.fillStyle = c; g.strokeStyle = "#fff"; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(0, -15); g.lineTo(10, 11); g.lineTo(0, 6); g.lineTo(-10, 11); g.closePath(); g.fill(); g.stroke(); g.restore();
+    const label = `${d.id} ${d.role_zh}${d.action_zh ? "・" + d.action_zh : ""}`;
+    g.font = "bold 13px sans-serif"; const w = g.measureText(label).width;
+    g.fillStyle = "rgba(255,255,255,.9)"; g.fillRect(x + 12, y - 22, w + 8, 18); g.fillStyle = c; g.fillText(label, x + 16, y - 9);
+  }
+}
 function drawMap(s) {
   const cv = $("map"), wrap = $("mapwrap");
+  syncVideo(s);
   const dpr = window.devicePixelRatio || 1, W = wrap.clientWidth, H = wrap.clientHeight;
   if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
   const g = cv.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, W, H);
+  if (s.video) { drawVideoOverlay(s, g, W, H); return; }
   const v = fitView(s), sc = Math.min(W, H) / v.span, R = 200;
   const P = (n, e) => [W / 2 + (e - v.e) * sc, H / 2 - (n - v.n) * sc];  // 北朝上、東朝右
   // 格線

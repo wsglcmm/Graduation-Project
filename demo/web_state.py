@@ -12,6 +12,9 @@ ROLE_ZH = {"chaser": "追擊", "blocker_left": "左翼", "blocker_right": "右�
 MODE_ZH = {"search": "搜尋", "track": "追蹤", "encircle": "包圍", "capture": "驅趕抓拍", "hold": "懸停", "return_home": "返航"}
 TRIGGER_ZH = {"operator": "操作員指令", "periodic": "定期", "target_lost": "目標遺失", "target_found": "發現目標",
               "role_assigned": "接到新角色", "changed": "情況改變"}
+# 影片場景的目標不會理無人機、趕不動：同一套 capture 角色，畫面上改用名副其實的名稱（報告也這樣寫）
+VIDEO_ROLE_ZH = {"herder": "尾隨", "capturer": "攔截抓拍", "blocker": "側翼"}
+VIDEO_MODE_ZH = {"capture": "預測攔截抓拍"}
 MAX_PLANS = 12
 MAX_ACTIONS = 30
 
@@ -71,8 +74,34 @@ def _action_row(r) -> dict:
     }
 
 
-def build_state(engine, backend: str = "sim", link=None) -> dict:
-    """engine：demo.engine.DemoEngine；backend：sim（替身）/ sitl（A 的 SITL）；link：fleet_link.FleetLink（sitl 時）。"""
+def build_state(engine, backend: str = "sim", link=None, video: Optional[dict] = None) -> dict:
+    """engine：demo.engine.DemoEngine；backend：sim（替身）/ sitl（A 的 SITL）；link：fleet_link.FleetLink（sitl 時）。
+    video：影片場景的固定資訊（src、寬高、ground → pixel 的 3×3 矩陣、是否暫代 ID…），這裡加上目前的影片時間。"""
+    if video is not None:
+        return _relabel_video(_build(engine, backend, link, video))
+    return _build(engine, backend, link, video)
+
+
+def _relabel_video(state: dict) -> dict:
+    """影片場景：角色與模式改成影片版名稱（只改顯示文字，role / mode 代碼不變，日誌照舊）。"""
+    def fix(row):
+        if row.get("role") in VIDEO_ROLE_ZH:
+            row["role_zh"] = VIDEO_ROLE_ZH[row["role"]]
+        if row.get("mode") in VIDEO_MODE_ZH:
+            row["mode_zh"] = VIDEO_MODE_ZH[row["mode"]]
+    fix(state)
+    for d in state["drones"]:
+        fix(d)
+    for p in state["plans"]:
+        fix(p)
+        for a in p["assignments"]:
+            fix(a)
+    for a in state["actions"]:
+        fix(a)
+    return state
+
+
+def _build(engine, backend: str, link, video: Optional[dict]) -> dict:
     cmd = engine.commander
     plan = cmd.current
     roles = {a.drone_id: a.role for a in plan.assignments} if plan else {}
@@ -109,7 +138,11 @@ def build_state(engine, backend: str = "sim", link=None) -> dict:
     caps = engine.metrics.captures
     m = engine.summary()
     devs = getattr(cmd, "drone_events", [])
+    vid = None
+    if video is not None:
+        vid = dict(video, t=round(getattr(engine.rabbit, "video_time_s", 0.0), 3))
     return {
+        "video": vid,
         "t": _r(engine.t_ns / 1e9), "backend": backend, "agents": "multi" if engine.multi else "single",
         "planner": cmd.planner_name, "max_speed_mps": engine.planner.cfg.max_speed_mps,
         "mode": plan.mode if plan else None, "mode_zh": MODE_ZH.get(plan.mode) if plan else None,

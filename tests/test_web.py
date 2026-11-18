@@ -81,3 +81,42 @@ def test_http_endpoints(server):
     bad = urllib.request.Request(base + "/command", data=b'{"text": "  "}', headers={"Content-Type": "application/json"})
     with pytest.raises(urllib.error.HTTPError):
         urllib.request.urlopen(bad)
+
+
+def test_video_range_and_calibration(tmp_path):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(bytes(range(256)) * 4)  # 1024 bytes 假影片
+    out = tmp_path / "video_ground_road01.json"
+    eng = engine()
+    demo = WebDemo(eng, speed=50.0, duration_s=1.0, video_file=video, ground_out=out).start()
+    srv = demo.make_server(port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        req = urllib.request.Request(base + "/video", headers={"Range": "bytes=100-199"})
+        with urllib.request.urlopen(req) as r:
+            assert r.status == 206 and r.headers["Content-Range"] == "bytes 100-199/1024" and r.read() == bytes(range(100, 200))
+        assert "地面標定" in urllib.request.urlopen(base + "/calibrate?video_id=road01").read().decode("utf-8")
+        pts = [{"pixel": [0, 0], "ground_ne_m": [10, 0]}, {"pixel": [100, 0], "ground_ne_m": [10, 10]},
+               {"pixel": [100, 100], "ground_ne_m": [0, 10]}, {"pixel": [0, 100], "ground_ne_m": [0, 0]},
+               {"pixel": [50, 50], "ground_ne_m": [5, 5]}]
+        body = json.dumps({"video_id": "road01", "points": pts, "save": True}).encode("utf-8")
+        res = json.loads(urllib.request.urlopen(urllib.request.Request(base + "/calibration?x=1", data=body)).read())
+        assert res["ok"] and res["rms_error_m"] == pytest.approx(0.0, abs=1e-9) and out.exists()
+        from coord_transform.homography import load_video_ground
+
+        assert load_video_ground(out).pixel_to_ground(100, 0) == pytest.approx((10.0, 10.0))
+    finally:
+        demo.stop()
+        srv.shutdown()
+        srv.server_close()
+        eng.commander.close()
+
+
+def test_video_scene_relabels_roles():
+    eng = engine(steps=400)
+    s = build_state(eng, video={"src": "/video", "width": 1920, "height": 1080, "ground_to_pixel": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]})
+    assert s["mode_zh"] == "預測攔截抓拍" and s["video"]["t"] == 0.0
+    assert {d["role_zh"] for d in s["drones"]} == {"尾隨", "攔截抓拍", "側翼"}
+    assert all(r["role_zh"] != "驅趕" for r in s["actions"])
+    eng.commander.close()
