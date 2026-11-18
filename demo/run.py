@@ -138,6 +138,19 @@ def start_terminal_input(engine: DemoEngine) -> None:
     print("可以在這個終端機輸入指令（支援中文），按 Enter 送出；關閉視窗結束。", flush=True)
 
 
+def print_step_events(engine: DemoEngine) -> None:
+    """把這一步新的事件印在終端機（網頁模式也同時保留文字紀錄）。"""
+    for ev in engine.commander.events[-1:]:
+        if ev.timestamp_ns == engine.t_ns:
+            print(event_line(ev))
+    for dev in engine.new_drone_events:
+        print(drone_event_line(dev))
+    for cap in engine.new_captures:
+        print(capture_line(cap))
+    for rec in engine.ledger.newly_resolved:
+        print(action_line(rec))
+
+
 def run_headless(engine: DemoEngine, duration_s: float, realtime: bool, scripted: List[Tuple[float, str]]) -> None:
     if realtime:  # 照真實時間跑時才有空打字；快轉模式請用 --cmd 預排
         start_terminal_input(engine)
@@ -312,6 +325,9 @@ def main(argv=None):
     ap.add_argument("--strategy", choices=("encircle", "capture"), default="encircle", help="規則式的預設策略：包圍 / 驅趕抓拍")
     ap.add_argument("--drone-speed", type=float, default=None,
                     help="替身無人機速度上限 m/s（預設：evader 時 3，對齊 A 的 SITL；rabbit 時 8）")
+    ap.add_argument("--web", action="store_true", help="網頁版 Demo 畫面（即時指令翻譯、角色卡片、動作日誌），瀏覽器開 http://127.0.0.1:8000/")
+    ap.add_argument("--port", type=int, default=8000, help="--web 的埠")
+    ap.add_argument("--no-browser", action="store_true", help="--web 時不要自動開瀏覽器")
     args = ap.parse_args(argv)
 
     cam = load_camera_config(ROOT / "config" / "camera.yaml")
@@ -326,7 +342,13 @@ def main(argv=None):
     engine = DemoEngine(cam, err, commander, rabbit=RabbitConfig(seed=args.seed), seed=args.seed, fleet=fleet,
                         evader=evader, drone_max_speed_mps=speed)
     try:
-        if args.headless:
+        if args.web:
+            from demo.web import run_web
+
+            run_web(engine, 1.0 if link is not None else args.speed, scripted, port=args.port,
+                    backend="sitl" if link is not None else "sim", link=link, open_browser=not args.no_browser,
+                    on_step=print_step_events, duration_s=args.duration if args.headless else None)
+        elif args.headless:
             llm_used = args.planner == "llm" or (args.agents == "multi" and args.drone_planner == "llm")
             run_headless(engine, args.duration, realtime=llm_used or link is not None, scripted=scripted)
         else:

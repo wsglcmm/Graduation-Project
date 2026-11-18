@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>無人機多 Agent 捕捉策略</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --ink: #1d2433; --muted: #6b7385; --line: #dfe3ea;
+    --ok: #2b8a3e; --okbg: #e6f4ea; --warn: #b35c00; --warnbg: #fff1db; --bad: #c92a2a; --badbg: #fde8e8;
+    --run: #1c64c8; --runbg: #e3edfb; --gray: #868e96; --graybg: #f1f3f5;
+    --herder: #e8590c; --capturer: #1971c2; --blocker: #7048e8; --chaser: #d6336c; --blocker_left: #0c8599;
+    --blocker_right: #2f9e44; --searcher: #5c677d; --overwatch: #9c36b5; --idle: #868e96;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--ink); font-family: "Microsoft JhengHei", "Noto Sans CJK TC", "PingFang TC", system-ui, sans-serif;
+         display: grid; grid-template-rows: auto minmax(0, 1fr) 290px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; padding: 10px; }
+  header { grid-column: 1 / 3; display: flex; align-items: center; gap: 14px; background: var(--panel); border: 1px solid var(--line);
+           border-radius: 8px; padding: 8px 14px; }
+  header h1 { font-size: 19px; margin: 0; white-space: nowrap; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; border-radius: 999px; padding: 2px 10px; font-size: 13px;
+          background: var(--graybg); color: var(--ink); white-space: nowrap; }
+  .chip b { font-weight: 700; }
+  .spacer { flex: 1; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-height: 0; display: flex; flex-direction: column; }
+  .panel h2 { font-size: 14px; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); color: var(--muted); font-weight: 700;
+              display: flex; align-items: center; gap: 8px; }
+  #mapwrap { position: relative; flex: 1; min-height: 0; }
+  #map { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #snapbox { position: absolute; right: 10px; top: 10px; width: 236px; background: rgba(255,255,255,.95); border: 1px solid var(--line);
+             border-radius: 6px; padding: 6px; font-size: 12px; display: none; }
+  #snapbox canvas { width: 224px; height: 168px; display: block; border-radius: 4px; }
+  #metrics { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--line); }
+  .metric { font-size: 13px; background: var(--graybg); border-radius: 6px; padding: 3px 8px; }
+  .metric b { font-size: 15px; }
+  #cmdbar { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  #cmdrow { display: flex; gap: 6px; }
+  #cmd { flex: 1; font-size: 16px; padding: 8px 10px; border: 2px solid var(--run); border-radius: 6px; font-family: inherit; }
+  button { font-family: inherit; font-size: 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel);
+           padding: 6px 10px; cursor: pointer; }
+  button.primary { background: var(--run); color: #fff; border-color: var(--run); font-weight: 700; }
+  #quick { display: flex; flex-wrap: wrap; gap: 6px; }
+  #quick button { font-size: 13px; padding: 4px 8px; }
+  #feed { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: #fff; }
+  .card.plan { border-left: 5px solid var(--ink); background: #fafbfc; }
+  .card.plan.operator { border-left-color: var(--run); background: var(--runbg); }
+  .card.plan.invalid { border-left-color: var(--bad); background: var(--badbg); }
+  .say { font-size: 17px; font-weight: 700; margin: 2px 0 4px; }
+  .meta { font-size: 12px; color: var(--muted); }
+  .reason { font-size: 13px; color: #3b4252; margin-top: 3px; }
+  .roles { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  .role { color: #fff; border-radius: 4px; padding: 1px 7px; font-size: 13px; font-weight: 700; }
+  .chain { display: grid; grid-template-columns: 1.1fr 1.3fr 1fr 1.1fr; gap: 6px; margin-top: 6px; }
+  .step { border-radius: 6px; padding: 5px 7px; font-size: 12.5px; background: var(--graybg); position: relative; min-width: 0; }
+  .step .k { font-size: 11px; color: var(--muted); display: block; margin-bottom: 1px; }
+  .step:not(:last-child)::after { content: "→"; position: absolute; right: -11px; top: 40%; color: var(--muted); font-weight: 700; }
+  .mono { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; word-break: break-all; }
+  .st { display: inline-block; border-radius: 4px; padding: 0 6px; font-weight: 700; font-size: 12.5px; }
+  .st.ok { color: var(--ok); background: var(--okbg); } .st.warn { color: var(--warn); background: var(--warnbg); }
+  .st.bad { color: var(--bad); background: var(--badbg); } .st.run { color: var(--run); background: var(--runbg); }
+  .st.gray { color: var(--gray); background: var(--graybg); }
+  #bottomL { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 8px; flex: 1; min-height: 0; }
+  .rcard { border: 1px solid var(--line); border-top: 6px solid var(--idle); border-radius: 8px; padding: 8px 10px; display: flex;
+           flex-direction: column; gap: 4px; min-height: 0; overflow: hidden; }
+  .rcard .id { font-size: 13px; color: var(--muted); }
+  .rcard .rn { font-size: 22px; font-weight: 800; }
+  .rcard .act { font-size: 15px; font-weight: 700; }
+  .rcard .row { font-size: 12.5px; }
+  #tablewrap { flex: 1; overflow: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { position: sticky; top: 0; background: #fafbfc; text-align: left; font-weight: 700; color: var(--muted); border-bottom: 1px solid var(--line); padding: 5px 6px; }
+  td { border-bottom: 1px solid #eef0f4; padding: 4px 6px; vertical-align: top; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
+  #conn { font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>無人機多 Agent 捕捉策略 Demo</h1>
+  <span class="chip">時間 <b id="h-t">0.0</b> s</span>
+  <span class="chip">策略 <b id="h-mode">—</b></span>
+  <span class="chip" id="h-dir" style="display:none"></span>
+  <span class="spacer"></span>
+  <span class="chip" id="h-agents"></span>
+  <span class="chip" id="h-backend"></span>
+  <span class="chip" id="h-speed"></span>
+  <span class="chip" id="conn">連線中…</span>
+</header>
+
+<section class="panel">
+  <h2>鳥瞰圖　<span class="meta">北朝上；色塊 = 各機相機視野，橘色圓 = 捕捉區，紅點 = 目標估計（圈 = 誤差），灰 × = 目標真值</span></h2>
+  <div id="mapwrap">
+    <canvas id="map"></canvas>
+    <div id="snapbox"><div id="snapcap" style="margin-bottom:4px"></div><canvas id="snap" width="448" height="336"></canvas></div>
+  </div>
+  <div id="metrics"></div>
+</section>
+
+<section class="panel">
+  <h2>即時指令翻譯　<span class="meta">自然語言 → 協調 Agent → 各機 Agent 動作 → 飛控指令 → A 的回覆 → 驗證（最新在上）</span></h2>
+  <div id="cmdbar">
+    <div id="cmdrow">
+      <input id="cmd" placeholder="輸入指令（中文可），例如：把那台車趕進捕捉區抓拍" autocomplete="off">
+      <button class="primary" id="send">送出</button>
+    </div>
+    <div id="quick"></div>
+  </div>
+  <div id="feed"></div>
+</section>
+
+<section class="panel">
+  <h2>各機角色卡片</h2>
+  <div id="bottomL"></div>
+</section>
+
+<section class="panel">
+  <h2>動作日誌　<span class="meta">每一筆都可查核；完整紀錄在輸出資料夾的 actions.csv</span></h2>
+  <div id="tablewrap"><table><thead><tr>
+    <th>時間</th><th>無人機 / Agent</th><th>角色 → 動作</th><th>飛控指令</th><th>A 回覆</th><th>指令一致</th><th>驗證</th>
+  </tr></thead><tbody id="tbody"></tbody></table></div>
+</section>
+
+<script>
+"use strict";
+const QUICK = ["把那台車趕進捕捉區抓拍", "三架一起把那台車包圍起來", "跟著那台車", "繼續搜尋", "全部懸停", "請返航"];
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const roleColor = (r) => css("--" + (r || "idle")) || css("--idle");
+const fmt = (x, d = 1) => (x === null || x === undefined) ? "—" : Number(x).toFixed(d);
+const pct = (x) => (x === null || x === undefined) ? "—" : Math.round(x * 100) + "%";
+function stClass(r) {
+  if (!r || r.result === null) return "run";
+  if (r.result === "succeeded") return r.adjusted ? "warn" : "ok";
+  if (r.result === "rejected" || r.result === "failed") return "bad";
+  return "gray";
+}
+
+// ---------- 指令輸入 ----------
+async function send(text) {
+  text = (text || "").trim();
+  if (!text) return;
+  const r = await fetch("/command", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({text})});
+  if (r.ok) $("cmd").value = "";
+}
+$("send").onclick = () => send($("cmd").value);
+$("cmd").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) send($("cmd").value); });
+QUICK.forEach((q) => { const b = document.createElement("button"); b.textContent = q; b.onclick = () => send(q); $("quick").appendChild(b); });
+
+// ---------- 鳥瞰圖 ----------
+// 視角自動跟著無人機、目標、捕捉區（平滑移動，避免畫面跳動）；最小顯示 80 m 見方
+let view = null;
+function fitView(s) {
+  const pts = s.drones.map((d) => [d.n, d.e]);
+  if (s.target) pts.push([s.target.n, s.target.e]);
+  if (s.truth) pts.push(s.truth);
+  if (s.zone) [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(([a, b]) => pts.push([s.zone.n + a * s.zone.r, s.zone.e + b * s.zone.r]));
+  const ns = pts.map((p) => p[0]), es = pts.map((p) => p[1]);
+  const want = {n: (Math.min(...ns) + Math.max(...ns)) / 2, e: (Math.min(...es) + Math.max(...es)) / 2,
+                span: Math.min(2 * (s.arena_radius_m || 60) + 24, Math.max(80, Math.max(...ns) - Math.min(...ns) + 40, Math.max(...es) - Math.min(...es) + 40))};
+  if (!view) view = want;
+  const k = 0.08;
+  view = {n: view.n + k * (want.n - view.n), e: view.e + k * (want.e - view.e), span: view.span + k * (want.span - view.span)};
+  return view;
+}
+function drawMap(s) {
+  const cv = $("map"), wrap = $("mapwrap");
+  const dpr = window.devicePixelRatio || 1, W = wrap.clientWidth, H = wrap.clientHeight;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const v = fitView(s), sc = Math.min(W, H) / v.span, R = 200;
+  const P = (n, e) => [W / 2 + (e - v.e) * sc, H / 2 - (n - v.n) * sc];  // 北朝上、東朝右
+  // 格線
+  g.strokeStyle = "#eceff3"; g.lineWidth = 1;
+  for (let q = -R; q <= R; q += 10) {
+    let [x1, y1] = P(-R, q), [x2, y2] = P(R, q); g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke();
+    [x1, y1] = P(q, -R); [x2, y2] = P(q, R); g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke();
+  }
+  // 場地（目標的活動範圍）
+  const [ox, oy] = P(0, 0);
+  g.strokeStyle = "#adb5bd"; g.setLineDash([6, 5]); g.beginPath(); g.arc(ox, oy, s.arena_radius_m * sc, 0, 2 * Math.PI); g.stroke(); g.setLineDash([]);
+  g.fillStyle = "#868e96"; g.font = "12px sans-serif"; g.fillText("N ↑", 8, 16); g.fillText("10 m 格線", 8, 32);
+  // 捕捉區
+  if (s.zone) {
+    const [x, y] = P(s.zone.n, s.zone.e);
+    g.fillStyle = "rgba(232,89,12,.16)"; g.strokeStyle = "rgba(232,89,12,.9)"; g.lineWidth = 2;
+    g.beginPath(); g.arc(x, y, s.zone.r * sc, 0, 2 * Math.PI); g.fill(); g.stroke();
+    g.fillStyle = "#c2410c"; g.font = "bold 13px sans-serif"; g.fillText("捕捉區", x - 20, y - s.zone.r * sc - 6);
+  }
+  // 視野
+  for (const d of s.drones) {
+    g.fillStyle = roleColor(d.role) + "12"; g.strokeStyle = roleColor(d.role) + "66"; g.lineWidth = 1;
+    g.beginPath(); d.fov.forEach(([n, e], i) => { const [x, y] = P(n, e); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.closePath(); g.fill(); g.stroke();
+  }
+  // 目標
+  if (s.truth) { const [x, y] = P(s.truth[0], s.truth[1]); g.strokeStyle = "#495057"; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(x - 5, y - 5); g.lineTo(x + 5, y + 5); g.moveTo(x + 5, y - 5); g.lineTo(x - 5, y + 5); g.stroke(); }
+  if (s.target) {
+    const t = s.target, [x, y] = P(t.n, t.e), lost = t.status !== "tracking";
+    g.strokeStyle = lost ? "#e03131aa" : "#e03131"; g.setLineDash(lost ? [4, 4] : []); g.lineWidth = 2;
+    g.beginPath(); g.arc(x, y, Math.max(4, 2 * t.unc * sc), 0, 2 * Math.PI); g.stroke(); g.setLineDash([]);
+    g.fillStyle = "#e03131"; g.beginPath(); g.arc(x, y, 5, 0, 2 * Math.PI); g.fill();
+    const [vx, vy] = P(t.n + t.vn * 3, t.e + t.ve * 3); g.beginPath(); g.moveTo(x, y); g.lineTo(vx, vy); g.stroke();
+    g.font = "bold 13px sans-serif"; g.fillText(`目標（${t.status === "tracking" ? "追蹤中" : t.status === "predicted" ? "預測" : "遺失"}）`, x + 8, y + 16);
+  }
+  // 無人機
+  for (const d of s.drones) {
+    const [x, y] = P(d.n, d.e), c = roleColor(d.role);
+    if (d.goal) { const [gx, gy] = P(d.goal[0], d.goal[1]); g.strokeStyle = c; g.setLineDash([3, 4]); g.lineWidth = 1.5;
+      g.beginPath(); g.moveTo(x, y); g.lineTo(gx, gy); g.stroke(); g.setLineDash([]);
+      g.beginPath(); g.moveTo(gx - 4, gy); g.lineTo(gx + 4, gy); g.moveTo(gx, gy - 4); g.lineTo(gx, gy + 4); g.stroke(); }
+    g.save(); g.translate(x, y); g.rotate(d.yaw);  // yaw：北 = 0、順時針為正 → 螢幕上同樣是順時針
+    g.fillStyle = c; g.strokeStyle = "#fff"; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(0, -13); g.lineTo(9, 10); g.lineTo(0, 5); g.lineTo(-9, 10); g.closePath(); g.fill(); g.stroke(); g.restore();
+    const label = `${d.id} ${d.role_zh}${d.action_zh ? "・" + d.action_zh : ""}`;
+    g.font = "bold 13px sans-serif"; const w = g.measureText(label).width;
+    g.fillStyle = "rgba(255,255,255,.9)"; g.fillRect(x + 12, y - 22, w + 8, 18);
+    g.fillStyle = c; g.fillText(label, x + 16, y - 9);
+  }
+}
+
+// ---------- 抓拍畫面（依抓拍判定的像素偏移重建的模擬相機畫面） ----------
+function drawSnap(s) {
+  const c = s.captures.length ? s.captures[s.captures.length - 1] : null;
+  $("snapbox").style.display = c ? "block" : "none";
+  if (!c) return;
+  const d = s.drones.find((x) => x.id === c.drone_id);
+  $("snapcap").innerHTML = `<b style="color:${roleColor(c.role)}">★ 抓拍成功</b>　${esc(c.drone_id)}（${esc(d ? d.role_zh : c.role)}）${fmt(c.t_s)} s`;
+  const cv = $("snap"), g = cv.getContext("2d"), W = cv.width, H = cv.height, k = W / 1280;
+  g.fillStyle = "#6f8f5d"; g.fillRect(0, 0, W, H);
+  g.strokeStyle = "rgba(255,255,255,.18)"; for (let x = 0; x < W; x += 32) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke(); }
+  for (let y = 0; y < H; y += 32) { g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); }
+  g.strokeStyle = "#fff"; g.setLineDash([8, 6]); g.lineWidth = 2; g.strokeRect(W * 0.4, H * 0.4, W * 0.2, H * 0.2); g.setLineDash([]);
+  const tx = W / 2 + c.pixel_offset[0] * k, ty = H / 2 + c.pixel_offset[1] * k, L = c.target_px * k, Wd = L * 0.45;
+  g.fillStyle = "#c92a2a"; g.fillRect(tx - Wd / 2, ty - L / 2, Wd, L);
+  g.strokeStyle = "#ffe066"; g.lineWidth = 3; g.strokeRect(tx - Wd / 2 - 4, ty - L / 2 - 4, Wd + 8, L + 8);
+  g.strokeStyle = "rgba(255,255,255,.8)"; g.lineWidth = 1; g.beginPath(); g.moveTo(W / 2 - 14, H / 2); g.lineTo(W / 2 + 14, H / 2);
+  g.moveTo(W / 2, H / 2 - 14); g.lineTo(W / 2, H / 2 + 14); g.stroke();
+  g.fillStyle = "#fff"; g.font = "bold 20px sans-serif"; g.fillText(`偏移 (${fmt(c.pixel_offset[0], 0)}, ${fmt(c.pixel_offset[1], 0)}) px　目標 ${fmt(c.target_px, 0)} px`, 10, H - 12);
+}
+
+// ---------- 即時指令翻譯 ----------
+function planCard(p) {
+  const cls = !p.valid ? "invalid" : p.trigger === "operator" ? "operator" : "";
+  const who = `${p.planner === "llm" ? "LLM" : "規則式"}${p.planner === "llm" ? "，" + fmt(p.latency_ms, 0) + " ms" : ""}`;
+  let h = `<div class="card plan ${cls}"><div class="meta">${fmt(p.t)} s　協調 Agent（${who}）・${esc(p.trigger_zh)}${p.model ? "・" + esc(p.model) : ""}</div>`;
+  if (p.operator_command) h += `<div class="say">操作員：「${esc(p.operator_command)}」</div>`;
+  if (!p.valid) return h + `<div class="reason"><span class="st bad">不合法，未送出</span> ${esc(p.error)}</div></div>`;
+  h += `<div><b>→ ${esc(p.mode_zh)}</b>${p.applied ? "" : ' <span class="st gray">已被新指令取代，未套用</span>'}</div><div class="roles">`;
+  for (const a of p.assignments) h += `<span class="role" style="background:${roleColor(a.role)}">${esc(a.drone_id)} ${esc(a.role_zh)}</span>`;
+  return h + `</div><div class="reason">理由：${esc(p.reason)}</div></div>`;
+}
+function actionCard(a) {
+  if (!a.drone_id) return "";  // 整個計畫不合法的已經在計畫卡顯示
+  const c = roleColor(a.role);
+  const who = a.agent_id === "coordinator" ? "協調 Agent" : `${a.drone_id} ${a.role_zh} Agent`;
+  const dec = a.valid
+    ? `<b style="color:${c}">${esc(a.action ? a.action + "（" + a.action_zh + "）" : a.role_zh)}</b><br>${esc(a.reason || "")}`
+    : `<span class="st bad">不合法，未送出</span><br>${esc(a.validation_error)}`;
+  const g = a.last_goal_ned;
+  const cmd = !a.valid ? "—" : (g ? `<span class="mono">GoalPoint(n ${fmt(g[0])}, e ${fmt(g[1])}, d ${fmt(g[2], 0)})</span>` : "—")
+    + (a.goals_sent ? ` <span class="meta">×${a.goals_sent}</span>` : "")
+    + (a.flight_command ? `<br><span class="mono">${esc(a.flight_command)}</span>` : "")
+    + (a.c_adjustments ? `<br><span class="meta">C 防撞修改 ${a.c_adjustments} 次</span>` : "");
+  const reply = !a.valid ? "—" : (a.acks ? `接受 ${a.accepted}${a.adjusted ? "・修改 " + a.adjusted : ""}${a.rejected ? "・拒絕 " + a.rejected : ""}`
+    + (a.last_ack_reason ? `<br><span class="meta">${esc(a.last_ack_reason)}</span>` : "") : '<span class="meta">替身模式（沒有 A）</span>');
+  const ver = `<span class="st ${stClass(a)}">${esc(a.status_zh)}</span>${a.consistency !== null ? ` <span class="meta">指令一致 ${pct(a.consistency)}</span>` : ""}`
+    + (a.why ? `<br><span class="meta">${esc(a.why)}</span>` : "");
+  return `<div class="card"><div class="meta">${fmt(a.t)} s　<span class="dot" style="background:${c}"></span>${esc(who)}（${a.planner === "llm" ? "LLM " + fmt(a.latency_ms, 0) + " ms" : "規則式"}）　${esc(a.action_id)}</div>
+    <div class="chain"><div class="step"><span class="k">① Agent 決策</span>${dec}</div><div class="step"><span class="k">② 飛控指令</span>${cmd}</div>
+    <div class="step"><span class="k">③ A 的回覆</span>${reply}</div><div class="step"><span class="k">④ 驗證</span>${ver}</div></div></div>`;
+}
+function drawFeed(s) {
+  const items = [...s.plans, ...s.actions.filter((a) => a.drone_id)];
+  items.sort((x, y) => (y.t - x.t) || (x.kind === "plan" ? 1 : -1));
+  const feed = $("feed"), top = feed.scrollTop;
+  feed.innerHTML = items.slice(0, 40).map((x) => x.kind === "plan" ? planCard(x) : actionCard(x)).join("");
+  feed.scrollTop = top;
+}
+
+// ---------- 角色卡片 / 動作日誌 / 指標 ----------
+function drawCards(s) {
+  $("bottomL").innerHTML = s.drones.map((d) => {
+    const c = roleColor(d.role), last = d.last;
+    return `<div class="rcard" style="border-top-color:${c}"><div class="id">${esc(d.id)}　高度 ${fmt(d.alt, 0)} m</div>
+      <div class="rn" style="color:${c}">${esc(d.role_zh)}</div>
+      <div class="act">${esc(d.action_zh || "—")}</div>
+      <div class="row">最近動作：${last ? `<span class="st ${stClass(last)}">${esc(last.status_zh)}</span> ${last.consistency !== null && last.consistency !== undefined ? "一致 " + pct(last.consistency) : ""}` : "—"}</div>
+      <div class="row meta">${last && last.why ? esc(last.why) : ""}</div>
+      <div class="row">A 的狀態：<b>${esc(d.a_status)}</b></div></div>`;
+  }).join("");
+}
+function drawTable(s) {
+  $("tbody").innerHTML = s.actions.slice().reverse().map((a) => {
+    const g = a.last_goal_ned;
+    return `<tr><td>${fmt(a.t)}</td><td><span class="dot" style="background:${roleColor(a.role)}"></span>${esc(a.drone_id || "整個計畫")}<br><span class="meta">${esc(a.agent_id || "")}</span></td>
+      <td>${esc(a.role_zh || "—")}${a.action ? " → <b>" + esc(a.action) + "</b>" : ""}</td>
+      <td class="mono">${g ? `n ${fmt(g[0])} e ${fmt(g[1])} d ${fmt(g[2], 0)}` : "—"}${a.flight_command ? "<br>" + esc(a.flight_command) : ""}</td>
+      <td>${a.acks ? `${a.accepted}/${a.adjusted}/${a.rejected}` : '<span class="meta">—</span>'}</td>
+      <td>${pct(a.consistency)}</td><td><span class="st ${stClass(a)}">${esc(a.status_zh)}</span></td></tr>`;
+  }).join("");
+}
+function drawHeader(s) {
+  $("h-t").textContent = fmt(s.t);
+  $("h-mode").textContent = s.mode_zh || "—";
+  $("h-agents").innerHTML = s.agents === "multi" ? "<b>多 Agent</b>（協調 + 各機）" : "<b>單一指揮官</b>";
+  $("h-backend").innerHTML = s.backend === "sitl" ? "<b>A 的 PX4 SITL</b>" : "替身模擬（sim2d）";
+  $("h-speed").textContent = `速度上限 ${fmt(s.max_speed_mps, 0)} m/s・規劃 ${s.planner === "llm" ? "LLM" : "規則式"}`;
+  const dir = $("h-dir");
+  dir.style.display = s.directive ? "inline-flex" : "none";
+  dir.innerHTML = s.directive ? `${s.paused ? "⏸ Agent 暫停" : "操作員指令有效"}：「${esc(s.directive)}」` : "";
+  const m = s.metrics;
+  $("metrics").innerHTML = [
+    ["抓拍完成", m.time_to_capture_s !== null ? fmt(m.time_to_capture_s) + " s" : "尚未"],
+    ["最小機間距離 3D / 水平", `${fmt(m.min_drone_distance_m)} / ${fmt(m.min_drone_horizontal_m)} m`],
+    ["指令一致率", pct(m.command_consistency)], ["動作到達率", pct(m.action_pass_rate)],
+    ["目標在視野內", pct(m.visible_fraction)], ["動作 / 計畫", `${m.actions} / ${m.plans}`],
+  ].map(([k, v]) => `<span class="metric">${k} <b>${v}</b></span>`).join("");
+}
+
+let last = null;
+function render(s) { last = s; drawHeader(s); drawMap(s); drawSnap(s); drawFeed(s); drawCards(s); drawTable(s); }
+window.addEventListener("resize", () => last && drawMap(last));
+function connect() {
+  const es = new EventSource("/events");
+  es.onopen = () => { $("conn").textContent = "● 即時連線"; $("conn").style.color = "var(--ok)"; };
+  es.onmessage = (e) => render(JSON.parse(e.data));
+  es.onerror = () => { $("conn").textContent = "連線中斷，重試中…"; $("conn").style.color = "var(--bad)"; };
+}
+connect();
+</script>
+</body>
+</html>
