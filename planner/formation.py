@@ -56,6 +56,7 @@ class FormationPlanner:
         self._search_center: Optional[tuple] = None
         self._search_since_ns: Optional[int] = None
         self.capture = CaptureGeometry(cfg.capture)
+        self._hold_anchor: Dict[str, tuple] = {}  # 各機 Agent 選 hold 時的懸停位置
         self.last_adjustments: List[Adjustment] = []  # 最近一次去衝突改了哪些目標點（之後進動作日誌）
         self.adjustment_count = 0  # 累計被去衝突修改的目標點數
 
@@ -77,7 +78,10 @@ class FormationPlanner:
             self._heading = math.atan2(p["e"] - ce, p["n"] - cn)
         return self._heading
 
-    def goal_points(self, plan: Plan, plan_id: str, drones: Sequence, targets: Sequence[dict], t_ns: int) -> List[dict]:
+    def goal_points(self, plan: Plan, plan_id: str, drones: Sequence, targets: Sequence[dict], t_ns: int,
+                    actions: Optional[Dict[str, str]] = None) -> List[dict]:
+        """actions：各機 Agent 的動作（多 Agent 模式，drone_id → 動作）。None = 單一指揮官，角色內建的規則決定怎麼做。"""
+        actions = actions or {}
         tgt = next((t for t in targets if t["target_id"] == plan.target_id), None)
         if tgt is not None and tgt["status"] != "lost":
             p = tgt["position_world_ned_m"]
@@ -95,7 +99,13 @@ class FormationPlanner:
         out = []
         for k, d in enumerate(drones):
             role = roles.get(d.drone_id, "idle")
-            n, e, alt = self._goal_for(plan, role, d, tgt, drones, t_ns, k, len(drones))
+            act = actions.get(d.drone_id)
+            if act == "hold" and plan.mode not in ("return_home",):
+                anchor = self._hold_anchor.setdefault(d.drone_id, (d.n, d.e))  # 懸停在開始 hold 的位置，不跟著漂移
+                n, e, alt = anchor[0], anchor[1], self.altitude(d.drone_id)
+            else:
+                self._hold_anchor.pop(d.drone_id, None)
+                n, e, alt = self._goal_for(plan, role, d, tgt, drones, t_ns, k, len(drones), act)
             yaw = None
             if tgt is not None:
                 tp = tgt["position_world_ned_m"]
@@ -124,7 +134,7 @@ class FormationPlanner:
         self.adjustment_count += len(self.last_adjustments)
         return out
 
-    def _goal_for(self, plan, role, d, tgt, drones, t_ns, k, count):
+    def _goal_for(self, plan, role, d, tgt, drones, t_ns, k, count, action: Optional[str] = None):
         alt = self.altitude(d.drone_id)
         if plan.mode == "hold" or role == "idle":
             return d.n, d.e, alt
@@ -143,7 +153,7 @@ class FormationPlanner:
         if role == "overwatch":
             return pn, pe, alt + self.cfg.overwatch_extra_alt_m
         if plan.mode == "capture" and role in CAPTURE_ONLY_ROLES and self.capture.zone is not None:
-            n, e = self.capture.goal(role, tgt, d)
+            n, e = self.capture.goal(role, tgt, d, action)
             return n, e, alt
         heading = self._target_heading(tgt, drones)
         radius = r * (self.cfg.track_extra_radius_factor if plan.mode == "track" else 1.0)

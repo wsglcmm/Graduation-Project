@@ -98,12 +98,25 @@ class CaptureGeometry:
             self._engaged = False
         return self.zone
 
-    def goal(self, role: str, target: dict, drone) -> Vec:
-        """某個角色的目標點 (n, e)。必須先呼叫 ensure_zone。"""
+    def goal(self, role: str, target: dict, drone, action: Optional[str] = None) -> Vec:
+        """某個角色的目標點 (n, e)。必須先呼叫 ensure_zone。
+
+        action：各機 Agent 選的動作（多 Agent 模式）。None = 單一指揮官模式，由這裡內建的規則決定
+        （和規則式各機 Agent 的決策相同，見 llm_agent/drone_agent.rule_action）。
+        """
         c, z = self.cfg, self.zone
         p, v = target["position_world_ned_m"], target["velocity_world_ned_mps"]
         tn, te = p["n"] + v["n"] * c.lead_s, p["e"] + v["e"] * c.lead_s
         u = _unit(tn - z.n, te - z.e) or (1.0, 0.0)  # 捕捉區 → 目標
+        if role == "capturer" and action in ("ambush", "engage"):
+            return (z.n, z.e) if action == "ambush" else (tn, te)
+        if role == "herder" and action in ("push", "circle_behind"):
+            if action == "push":
+                return tn + u[0] * c.herd_distance_m, te + u[1] * c.herd_distance_m
+            rel = _unit(drone.n - tn, drone.e - te) or _rot(u, math.pi / 2)
+            side = 1.0 if (u[0] * rel[1] - u[1] * rel[0]) >= 0 else -1.0
+            fn, fe = _rot(u, side * math.pi / 2)
+            return tn + fn * 1.5 * c.herd_distance_m, te + fe * 1.5 * c.herd_distance_m
         if role == "capturer":
             # 遲滯：進入 engage_radius_m 才迎上去，超過 disengage_radius_m 才放棄。
             # 只用一個門檻時，抓拍機一迎上去就把目標嚇回門檻外，於是退回伏擊點、目標又靠近……

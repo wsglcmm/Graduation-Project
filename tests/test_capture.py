@@ -155,3 +155,14 @@ def test_rule_keeps_capture_roles_during_same_capture():
     assert again.assignments == first.assignments
     other = rule_plan(moved, [target(n=3.0, tid=2)], "抓拍那台車", previous=first)  # 換目標才重新分派
     assert [x.model_dump() for x in other.assignments] == capture_assignment(moved, 3.0, 0.0)
+
+
+
+def test_capture_geometry_obeys_drone_agent_actions():
+    """多 Agent：各機 Agent 選的動作優先於內建規則。"""
+    g = make_geo(target())  # 捕捉區 (35, 0)
+    assert g.goal("capturer", target(n=0.0), DRONES[2], "engage") == pytest.approx((0.0, 0.0))  # 35 m 外也照 Agent 的決定迎上去
+    assert g.goal("capturer", target(n=20.0), DRONES[2], "ambush") == pytest.approx((35.0, 0.0))
+    assert g.goal("herder", target(), DroneState("uav1", -20, 0, 25), "push") == pytest.approx((-12.0, 0.0))
+    n, e = g.goal("herder", target(), DroneState("uav1", -20, 0, 25), "circle_behind")
+    assert abs(e) == pytest.approx(18.0) and n == pytest.approx(0.0, abs=1e-6)
