@@ -59,3 +59,16 @@ def test_return_home_uses_home_positions():
     rth = rth.model_copy(update={"assignments": [a.model_copy(update={"role": "chaser"}) for a in rth.assignments]})
     gps = fp.goal_points(rth, "p", DRONES, [], 0)
     assert [(g["position_world_ned_m"]["n"], g["position_world_ned_m"]["e"]) for g in gps] == [(0.0, 0.0), (0.0, 5.0), (0.0, 10.0)]
+
+
+def test_search_speed_fraction_limits_goal_speed():
+    """search_speed_fraction > 0：搜尋圈目標點的切線速度不超過速度上限 × 比例。"""
+    cfg = FormationConfig(min_goal_separation_m=0, max_speed_mps=5.0, search_speed_fraction=0.8, search_growth_mps=0.0)
+    fp = FormationPlanner(cfg)
+    srch = plan("search", target_id=None, assignments=[{"drone_id": i, "role": "searcher"} for i in IDS], formation={"radius_m": 40.0})
+    pts = []
+    for k in range(11):  # 1 秒
+        g = fp.goal_points(srch, "p", DRONES, [], int(k * 1e8))[0]["position_world_ned_m"]
+        pts.append((g["n"], g["e"]))
+    speed = sum(math.dist(a, b) for a, b in zip(pts, pts[1:])) / 1.0
+    assert speed == pytest.approx(4.0, rel=0.05)  # 0.8 × 5 m/s；不限制時是 0.25 rad/s × 40 m = 10 m/s

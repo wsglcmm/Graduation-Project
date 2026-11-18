@@ -38,10 +38,15 @@ def _parse_operator(cmd: Optional[str]) -> Optional[str]:
     return "hold"  # 看不懂的指令：保守懸停
 
 
-def capture_assignment(drones: Sequence, tn: float, te: float, cfg: CaptureConfig = CaptureConfig()) -> list:
+def _vel(tgt: dict):
+    v = tgt.get("velocity_world_ned_mps") or {"n": 0.0, "e": 0.0}
+    return v["n"], v["e"]
+
+
+def capture_assignment(drones: Sequence, tn: float, te: float, cfg: CaptureConfig = CaptureConfig(), vel=None) -> list:
     """捕捉策略的角色分派：用和隊形規劃器相同的方法估捕捉區，
     再窮舉排列，選「抓拍機飛到捕捉區 + 驅趕機飛到目標後方 + 封鎖機飛到側面」總距離最短的。"""
-    zone = propose_zone(tn, te, drones, cfg)
+    zone = propose_zone(tn, te, drones, cfg, vel=vel)
     un, ue = tn - zone.n, te - zone.e
     r = math.hypot(un, ue) or 1.0
     un, ue = un / r, ue / r
@@ -88,7 +93,7 @@ def rule_plan(drones: Sequence, targets: Sequence[dict], operator_command: Optio
             return Plan(mode="capture", target_id=tgt["target_id"], assignments=[a.model_dump() for a in previous.assignments],
                         formation={"radius_m": radius_m}, reason="捕捉進行中，維持原本的角色分工")
         reason = "驅趕機從後方把目標趕向捕捉區，抓拍機在捕捉區等、目標靠近時迎上去抓拍"
-        return Plan(mode="capture", target_id=tgt["target_id"], assignments=capture_assignment(drones, p["n"], p["e"]),
+        return Plan(mode="capture", target_id=tgt["target_id"], assignments=capture_assignment(drones, p["n"], p["e"], vel=_vel(tgt)),
                     formation={"radius_m": radius_m}, reason=reason)
     mode = forced if forced in ("track", "encircle", "search") else ("encircle" if dist < ENCIRCLE_RANGE_FACTOR * radius_m else "track")
     if mode == "search":

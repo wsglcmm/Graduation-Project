@@ -31,6 +31,11 @@ class CaptureConfig:
     disengage_radius_m: float = 30.0  # 迎上去之後，目標離捕捉區超過這個距離才放棄、回伏擊點（遲滯）
     lead_s: float = 1.0
     side_switch_mps: float = 0.3  # 目標側向速度超過這個值才換封鎖邊
+    # 捕捉區放在目標的哪個方向：fleet = 機群中心 → 目標的延長線；velocity = 目標正在跑的方向；
+    # center = 目標 → 場地中心（遠離牆）；auto = 目標在跑（> 0.5 m/s）用 velocity，否則 center。
+    # 實驗（20 seeds、3 / 5 m/s）fleet 最好：目標會往遠離無人機的方向逃，順勢趕最省力；
+    # center 在 3 m/s 只有 4/20 抓到（要把目標往回趕過整個機群）。
+    zone_direction: str = "fleet"
 
 
 @dataclass(frozen=True)
@@ -53,15 +58,32 @@ def _rot(v: Vec, a: float) -> Vec:
     return v[0] * c - v[1] * s, v[0] * s + v[1] * c
 
 
-def propose_zone(tn: float, te: float, drones: Sequence, cfg: CaptureConfig = CaptureConfig(),
-                 fallback_heading_rad: float = 0.0) -> CaptureZone:
-    """決定捕捉區中心。drones 為 DroneState（world_ned）。
-
-    優先「機群中心 → 目標」的方向；若因場地邊界被壓縮得太近，依序試 ±45°、±90°、±135°，選離目標最遠的。
-    """
+def zone_base_direction(tn: float, te: float, drones: Sequence, cfg: CaptureConfig, vel: Optional[Vec] = None,
+                        fallback_heading_rad: float = 0.0) -> Vec:
+    """捕捉區相對目標的方向（單位向量，world_ned）。見 CaptureConfig.zone_direction。"""
+    fallback = (math.cos(fallback_heading_rad), math.sin(fallback_heading_rad))
     cn = sum(d.n for d in drones) / len(drones) if drones else tn
     ce = sum(d.e for d in drones) / len(drones) if drones else te
-    base = _unit(tn - cn, te - ce) or (math.cos(fallback_heading_rad), math.sin(fallback_heading_rad))
+    fleet = _unit(tn - cn, te - ce)
+    center = _unit(-tn, -te)
+    moving = _unit(*vel) if vel is not None and math.hypot(*vel) > 0.5 else None
+    mode = cfg.zone_direction
+    if mode == "velocity":
+        return moving or fleet or fallback
+    if mode == "center":
+        return center or fleet or fallback
+    if mode == "auto":
+        return moving or center or fleet or fallback
+    return fleet or fallback
+
+
+def propose_zone(tn: float, te: float, drones: Sequence, cfg: CaptureConfig = CaptureConfig(),
+                 fallback_heading_rad: float = 0.0, vel: Optional[Vec] = None) -> CaptureZone:
+    """決定捕捉區中心。drones 為 DroneState（world_ned）；vel 為目標速度 (vn, ve)。
+
+    方向見 CaptureConfig.zone_direction；若因場地邊界被壓縮得太近，依序試 ±45°、±90°、±135°，選離目標最遠的。
+    """
+    base = zone_base_direction(tn, te, drones, cfg, vel, fallback_heading_rad)
     limit = cfg.arena_radius_m - cfg.zone_margin_m
     best, best_score = None, -math.inf
     for k, a in enumerate((0.0, 0.25, -0.25, 0.5, -0.5, 0.75, -0.75)):
@@ -93,7 +115,8 @@ class CaptureGeometry:
         """capture 開始（或換目標）時決定捕捉區；之後沿用。target 為 FusedTarget dict。"""
         if self.zone is None or self._target_id != target["target_id"]:
             p = target["position_world_ned_m"]
-            self.zone = propose_zone(p["n"], p["e"], drones, self.cfg, heading_rad)
+            v = target.get("velocity_world_ned_mps") or {"n": 0.0, "e": 0.0}
+            self.zone = propose_zone(p["n"], p["e"], drones, self.cfg, heading_rad, (v["n"], v["e"]))
             self._target_id = target["target_id"]
             self._engaged = False
         return self.zone

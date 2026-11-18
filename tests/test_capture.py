@@ -166,3 +166,16 @@ def test_capture_geometry_obeys_drone_agent_actions():
     assert g.goal("herder", target(), DroneState("uav1", -20, 0, 25), "push") == pytest.approx((-12.0, 0.0))
     n, e = g.goal("herder", target(), DroneState("uav1", -20, 0, 25), "circle_behind")
     assert abs(e) == pytest.approx(18.0) and n == pytest.approx(0.0, abs=1e-6)
+
+
+def test_zone_direction_options():
+    drones = [DroneState("uav1", -20, 0, 25)]  # 機群在南邊
+    def zone(mode, vel=None, tn=0.0, te=20.0):
+        return propose_zone(tn, te, drones, CaptureConfig(zone_direction=mode), vel=vel)
+    z = zone("fleet")
+    assert z.n > 0  # 機群 → 目標的延長線（往北偏東）
+    z = zone("velocity", vel=(0.0, -2.0))
+    assert z.e < 20.0 - 30  # 目標往西跑 → 捕捉區在西邊
+    z = zone("center")
+    assert abs(z.n) < 1e-6 and z.e < 20.0  # 目標 → 場地中心
+    assert zone("auto", vel=(0.1, 0.0)) == zone("center")  # 幾乎不動：朝中心

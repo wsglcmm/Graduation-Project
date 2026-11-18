@@ -39,6 +39,11 @@ class FormationConfig:
     search_angular_speed_rps: float = 0.25
     search_growth_mps: float = 2.0  # 搜尋圈半徑每秒擴大多少（找不到就越找越大）
     search_max_radius_m: float = 60.0
+    # 搜尋圈切線速度上限 = 速度上限 × 這個比例；0 = 不限制。
+    # 實驗（20 seeds）：限制成 0.8 時搜尋目標點追得上（動作到達率 43% → 60%、3 m/s 最小水平距離 3.1 → 6.5 m），
+    # 但抓拍變慢（5 m/s 38.1 → 43.3 s、3 m/s 20/20 → 12/20），因為找到目標時三架平均散在圈上；
+    # 1.5、2.5 也沒有全面更好。抓拍是主要指標，所以預設維持 0（不限制），細節見 demo/README.md。
+    search_speed_fraction: float = 0.0
     initial_search_center: tuple = (0.0, 0.0)  # 還沒看過目標時的搜尋中心（場地中心或操作員給的大致位置）
     max_speed_mps: float = 8.0  # 建議值；A 的速度上限優先
     capture: CaptureConfig = field(default_factory=CaptureConfig)
@@ -55,6 +60,8 @@ class FormationPlanner:
         self._heading: Optional[float] = None
         self._search_center: Optional[tuple] = None
         self._search_since_ns: Optional[int] = None
+        self._search_phase = 0.0  # 搜尋圈的相位（rad），逐步累加：角速度會依半徑與速度上限調整
+        self._last_t_ns: Optional[int] = None
         self.capture = CaptureGeometry(cfg.capture)
         self._hold_anchor: Dict[str, tuple] = {}  # 各機 Agent 選 hold 時的懸停位置
         self.last_adjustments: List[Adjustment] = []  # 最近一次去衝突改了哪些目標點（之後進動作日誌）
@@ -67,6 +74,19 @@ class FormationPlanner:
 
     def altitude(self, drone_id: str) -> float:
         return self.cfg.altitude_layers_m.get(drone_id, self.cfg.default_altitude_m)
+
+    def _search_radius(self, r: float, t_ns: int) -> float:
+        elapsed = (t_ns - self._search_since_ns) / 1e9 if self._search_since_ns is not None else 0.0
+        return min(self.cfg.search_max_radius_m, r + self.cfg.search_growth_mps * elapsed)
+
+    def _search_omega(self, r: float, t_ns: int) -> float:
+        """搜尋圈角速度（rad/s）：不讓目標點的切線速度超過速度上限的 search_speed_fraction。
+        原本固定 0.25 rad/s，半徑 60 m 時切線速度 15 m/s，是無人機（3–5 m/s）的 3–5 倍，
+        無人機永遠追不上自己的目標點、只能抄近路（動作日誌量到搜尋時追蹤誤差平均 21–35 m）。"""
+        rr = max(1.0, self._search_radius(r, t_ns))
+        if self.cfg.search_speed_fraction <= 0:
+            return self.cfg.search_angular_speed_rps
+        return min(self.cfg.search_angular_speed_rps, self.cfg.search_speed_fraction * self.cfg.max_speed_mps / rr)
 
     def _target_heading(self, tgt: dict, drones: Sequence) -> float:
         v = tgt["velocity_world_ned_mps"]
@@ -91,6 +111,9 @@ class FormationPlanner:
             self._search_since_ns = t_ns
         elif not searching:
             self._search_since_ns = None
+        if searching and self._last_t_ns is not None and t_ns > self._last_t_ns:
+            self._search_phase += self._search_omega(plan.formation.radius_m, t_ns) * (t_ns - self._last_t_ns) / 1e9
+        self._last_t_ns = t_ns
         if plan.mode == "capture" and tgt is not None and tgt["status"] != "lost":
             self.capture.ensure_zone(tgt, drones, self._target_heading(tgt, drones))
         elif plan.mode != "capture":
@@ -144,9 +167,11 @@ class FormationPlanner:
         r = plan.formation.radius_m
         if plan.mode == "search" or role == "searcher" or tgt is None or tgt["status"] == "lost":
             cn, ce = self._search_center or self.cfg.initial_search_center
-            elapsed = (t_ns - self._search_since_ns) / 1e9 if self._search_since_ns is not None else 0.0
-            rr = min(self.cfg.search_max_radius_m, r + self.cfg.search_growth_mps * elapsed)
-            ang = self.cfg.search_angular_speed_rps * t_ns / 1e9 + 2 * math.pi * k / count
+            rr = self._search_radius(r, t_ns)
+            if self.cfg.search_speed_fraction > 0:
+                ang = self._search_phase + 2 * math.pi * k / count
+            else:  # 原本的行為：固定角速度 × 絕對時間（預設，保持和之前的實驗結果完全一致）
+                ang = self.cfg.search_angular_speed_rps * t_ns / 1e9 + 2 * math.pi * k / count
             return cn + rr * math.cos(ang), ce + rr * math.sin(ang), alt
         p, v = tgt["position_world_ned_m"], tgt["velocity_world_ned_mps"]
         pn, pe = p["n"] + v["n"] * self.cfg.lead_s, p["e"] + v["e"] * self.cfg.lead_s
