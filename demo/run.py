@@ -48,6 +48,17 @@ def make_commander(planner: str, period_s: float, strategy: str = "encircle") ->
     return Commander(ids, llm=create_llm_client(), period_s=period_s, strategy=strategy)  # AGENT_PROVIDER：gemini（預設）/ anthropic
 
 
+def action_line(r) -> str:
+    """動作日誌一筆有結果時的一行摘要：哪一架、角色、驗證結果、原因。"""
+    mark = {"succeeded": "✓", "failed": "✗", "rejected": "⛔"}.get(r.result, "·")
+    t = r.t_start_s
+    who = f"{r.drone_id}（{ROLE_ZH.get(r.role, r.role or '—')}）" if r.drone_id else "（整個計畫）"
+    extra = f"，A 修改 {r.adjusted} 次" if r.adjusted else ""
+    if r.command_consistency is not None:
+        extra += f"，指令一致 {r.command_consistency:.0%}"
+    return f"[{t:5.1f}s] {mark} 動作 {r.action_id} {who} {r.status_zh}：{r.why}{extra}"
+
+
 def capture_line(c) -> str:
     who = f"{c.drone_id}（{ROLE_ZH.get(c.role, c.role or '—')}）"
     return f"[{c.t_s:5.1f}s] ★ 抓拍成功：{who} 目標在畫面中央（偏移 {c.pixel_offset[0]:+.0f}, {c.pixel_offset[1]:+.0f} px，約 {c.target_px:.0f} px）"
@@ -112,6 +123,8 @@ def run_headless(engine: DemoEngine, duration_s: float, realtime: bool, scripted
             print(event_line(ev))
         for cap in engine.new_captures:
             print(capture_line(cap))
+        for rec in engine.ledger.newly_resolved:
+            print(action_line(rec))
         if realtime:  # LLM 模式要照真實時間跑，延遲才有意義
             time.sleep(max(0.0, engine.dt - (time.monotonic() - t0)))
     engine.commander.wait_idle()
@@ -168,6 +181,8 @@ def run_gui(engine: DemoEngine, speed: float, scripted: List[Tuple[float, str]])
                 lines.insert(0, event_line(ev))
             for cap in engine.new_captures:
                 lines.insert(0, capture_line(cap))
+            for rec in engine.ledger.newly_resolved:
+                lines.insert(0, action_line(rec))
         del lines[9:]
         tn, te = engine.truth
         trail_x.append(te)
@@ -289,6 +304,8 @@ def main(argv=None):
 
     out = Path(args.out) if args.out else ROOT / "output" / "demo" / time.strftime("%Y%m%d_%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
+    engine.ledger.finish(engine.t_ns / 1e9)
+    engine.ledger.write(out)  # actions.jsonl / actions.csv：動作日誌與驗證
     summary = engine.summary()
     (out / "metrics.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     with open(out / "events.jsonl", "w", encoding="utf-8") as f:

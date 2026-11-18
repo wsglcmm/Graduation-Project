@@ -39,6 +39,8 @@ REPORT_KEYS = (  # summary.md 的欄位順序（key, 標題, 格式）
     ("encircled_fraction", "包圍時間比例", "{:.0%}"),
     ("visible_fraction", "視野內比例", "{:.0%}"),
     ("estimate_rmse_m", "估計誤差 RMSE (m)", "{:.2f}"),
+    ("command_consistency", "指令一致率", "{:.0%}"),
+    ("action_pass_rate", "動作到達率", "{:.0%}"),
     ("min_drone_distance_m", "最小機間距離 (m)", "{:.1f}"),
     ("min_drone_horizontal_m", "最小水平距離 (m)", "{:.1f}"),
     ("plan_valid_rate", "計畫合法率", "{:.0%}"),
@@ -91,6 +93,7 @@ def run_once(scn: Scenario, seed: int, planner: str, period_s: float, cam, err, 
         commander.wait_idle()
     finally:
         commander.close()
+    engine.ledger.finish(engine.t_ns / 1e9)
     m = engine.summary()
     m.update(operator_metrics(commander.events, scn.commands))
     if scn.reencircle_from_s is not None:

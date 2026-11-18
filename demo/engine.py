@@ -8,6 +8,7 @@
     5. 依目前計畫算各機目標點                           planner.formation
     6. 無人機替身追目標點（或 A 的 3 架 SITL）            sim2d.fleet_sim / fleet_link
     7. 裁判：抓拍判定、目標是否進入捕捉區                demo.capture_judge
+    8. 動作日誌與驗證：Agent 動作 → 飛控指令 → A 的回覆 → 實際是否達成   ledger
 """
 import math
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from coord_transform.config import CameraConfig
 from coord_transform.uncertainty import ErrorModel
 from fusion import TargetTracker, ViewModel, fuse
 from demo.capture_judge import CaptureCriteria, CaptureJudge
+from ledger import ActionLedger, VerifyConfig
 from llm_agent.commander import Commander
 from planner import CaptureConfig, FormationConfig, FormationPlanner
 from sim2d import Evader, EvaderConfig, FleetSim, FleetSimConfig, RabbitConfig, RabbitPath
@@ -120,6 +122,7 @@ class DemoEngine:
         sim_cfg = FleetSimConfig(max_speed_mps=drone_max_speed_mps) if drone_max_speed_mps else FleetSimConfig()
         self.sim = fleet if fleet is not None else FleetSim(start, sim_cfg)
         self.judge = CaptureJudge(cam, capture_criteria)
+        self.ledger = ActionLedger(VerifyConfig(max_speed_mps=cfg.max_speed_mps))
         self.new_captures: list = []
         self.metrics = Metrics()
         self.target_state: Optional[dict] = None
@@ -137,10 +140,18 @@ class DemoEngine:
         self.target_state = self.tracker.step(self.t_ns, fused[0] if fused else None)
         targets = [self.target_state] if self.target_state else []
         events = self.commander.tick(self.t_ns, drones, targets)
+        t_s = self.t_ns / S
+        for ev in events:
+            self.ledger.on_event(ev, t_s)
         if self.commander.current is not None:
             self.goals = self.planner.goal_points(self.commander.current, self.commander.current_id, drones, targets, self.t_ns)
             self.sim.apply_goals(self.goals, self.t_ns)
+            self.ledger.on_goals(self.goals, self.planner.last_adjustments, drones, t_s)
         self.sim.step(self.dt, self.t_ns)
+        drain = getattr(self.sim, "drain_acks", None)  # 只有接 A 的 SITL 才有回覆
+        if drain is not None:
+            self.ledger.on_acks(drain(), t_s)
+        self.ledger.on_poses(self.sim.states(), t_s)
         plan = self.commander.current
         roles = {a.drone_id: a.role for a in plan.assignments} if plan else {}
         self.new_captures = self.judge.update(self.t_ns, self.sim.states(), roles, *self.truth)
@@ -177,4 +188,7 @@ class DemoEngine:
     def summary(self) -> dict:
         out = self.metrics.summary(self.commander, self.sim)
         out["goal_deconflict_adjustments"] = self.planner.adjustment_count
+        out["actions"] = self.ledger.summary()
+        out["action_pass_rate"] = out["actions"]["action_pass_rate"]
+        out["command_consistency"] = out["actions"]["command_consistency"]
         return out

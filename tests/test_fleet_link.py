@@ -137,6 +137,10 @@ def test_demo_engine_runs_on_sitl_backend(link):
     assert link.stats.goals_sent > 0 and link.stats.rejected == 0
     assert all("上限" not in r for r in link.stats.last_reason.values())
     assert fleet.min_pair_distance_m >= 5.0
+    # 動作日誌收到 A 的回覆與實際呼叫的 MAVSDK 函式（規格 §10.8）
+    recs = [r for r in eng.ledger.records if r.drone_id]
+    assert recs and all(r.acks > 0 and r.accepted > 0 for r in recs)
+    assert all(r.flight_command["mavsdk"] == "offboard.set_position_ned" for r in recs)
 
 
 def test_demo_run_sitl_connect_failure_exits_without_traceback():
