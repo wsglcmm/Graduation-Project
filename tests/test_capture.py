@@ -179,3 +179,25 @@ def test_zone_direction_options():
     z = zone("center")
     assert abs(z.n) < 1e-6 and z.e < 20.0  # 目標 → 場地中心
     assert zone("auto", vel=(0.1, 0.0)) == zone("center")  # 幾乎不動：朝中心
+
+
+def test_zone_replan_only_when_enabled_and_target_turns_away():
+    from planner.capture import CaptureConfig, CaptureGeometry
+
+    drones = [type("D", (), {"n": -30.0, "e": 0.0})()]
+
+    def tgt(n, e, vn, ve):
+        return {"target_id": 1, "position_world_ned_m": {"n": n, "e": e}, "velocity_world_ned_mps": {"n": vn, "e": ve}}
+
+    fixed = CaptureGeometry(CaptureConfig(zone_direction="velocity", arena_radius_m=200.0))
+    z0 = fixed.ensure_zone(tgt(0, 0, 5, 0), drones, 0.0, 0.0)
+    assert (round(z0.n), round(z0.e)) == (35, 0)
+    assert fixed.ensure_zone(tgt(0, 0, 0, 5), drones, 0.0, 10.0) == z0  # 預設：固定不動（策略場景）
+
+    g = CaptureGeometry(CaptureConfig(zone_direction="velocity", arena_radius_m=200.0, replan_zone_s=3.0))
+    g.ensure_zone(tgt(0, 0, 5, 0), drones, 0.0, 0.0)
+    assert g.ensure_zone(tgt(0, 0, 0, 5), drones, 0.0, 1.0) == z0  # 還沒到 3 s
+    assert g.ensure_zone(tgt(0, 0, 0.5, 0.5), drones, 0.0, 5.0) == z0  # 太慢（停車抖動）不換
+    assert g.ensure_zone(tgt(0, 0, 4, 1), drones, 0.0, 5.0) == z0  # 仍大致朝捕捉區前進
+    z1 = g.ensure_zone(tgt(0, 0, 0, 5), drones, 0.0, 5.0)  # 轉 90°：重新預測到東方
+    assert (round(z1.n), round(z1.e)) == (0, 35) and g.zone_replans == 1

@@ -36,6 +36,11 @@ class CaptureConfig:
     # 實驗（20 seeds、3 / 5 m/s）fleet 最好：目標會往遠離無人機的方向逃，順勢趕最省力；
     # center 在 3 m/s 只有 4/20 抓到（要把目標往回趕過整個機群）。
     zone_direction: str = "fleet"
+    # 捕捉區重新預測（秒）。None = 同一次 capture 期間固定不動（策略場景：目標會逃，靠驅趕把它趕進去）。
+    # 影片場景的目標不會理無人機、也趕不動：每隔這麼久檢查一次，目標在跑（≥ replan_min_speed_mps）
+    # 卻不是朝捕捉區前進（夾角 > 60°）時，改放到它新的前進方向（預測攔截）。
+    replan_zone_s: Optional[float] = None
+    replan_min_speed_mps: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -107,19 +112,42 @@ class CaptureGeometry:
         self._side = 1.0
         self._target_id: Optional[int] = None
         self._engaged = False
+        self._zone_t: Optional[float] = None  # 上次放捕捉區的時間（s）
+        self.zone_replans = 0
 
     def reset(self) -> None:
         self.zone, self._target_id, self._side, self._engaged = None, None, 1.0, False
+        self._zone_t = None
 
-    def ensure_zone(self, target: dict, drones: Sequence, heading_rad: float) -> CaptureZone:
-        """capture 開始（或換目標）時決定捕捉區；之後沿用。target 為 FusedTarget dict。"""
-        if self.zone is None or self._target_id != target["target_id"]:
-            p = target["position_world_ned_m"]
-            v = target.get("velocity_world_ned_mps") or {"n": 0.0, "e": 0.0}
+    def ensure_zone(self, target: dict, drones: Sequence, heading_rad: float, t_s: Optional[float] = None) -> CaptureZone:
+        """capture 開始（或換目標）時決定捕捉區；之後沿用（CaptureConfig.replan_zone_s 有設時會重新預測）。
+        target 為 FusedTarget dict；t_s：目前時間（s），重新預測要用。"""
+        p = target["position_world_ned_m"]
+        v = target.get("velocity_world_ned_mps") or {"n": 0.0, "e": 0.0}
+        new = self.zone is None or self._target_id != target["target_id"]
+        if not new and self._should_replan(p, v, t_s):
+            new = True
+            self.zone_replans += 1
+        if new:
             self.zone = propose_zone(p["n"], p["e"], drones, self.cfg, heading_rad, (v["n"], v["e"]))
             self._target_id = target["target_id"]
             self._engaged = False
+            self._zone_t = t_s
         return self.zone
+
+    def _should_replan(self, p: dict, v: dict, t_s: Optional[float]) -> bool:
+        """目標在跑、離捕捉區還遠、而且不是朝捕捉區前進（夾角 > 60°）→ 重新預測。只在 replan_zone_s 有設時。"""
+        c, z = self.cfg, self.zone
+        if c.replan_zone_s is None or t_s is None:
+            return False
+        if self._zone_t is not None and t_s - self._zone_t < c.replan_zone_s:
+            return False
+        speed = math.hypot(v["n"], v["e"])
+        dz = math.hypot(z.n - p["n"], z.e - p["e"])
+        if speed < c.replan_min_speed_mps or dz <= c.engage_radius_m:
+            return False
+        cos = ((z.n - p["n"]) * v["n"] + (z.e - p["e"]) * v["e"]) / (speed * dz)
+        return cos < 0.5
 
     def goal(self, role: str, target: dict, drone, action: Optional[str] = None) -> Vec:
         """某個角色的目標點 (n, e)。必須先呼叫 ensure_zone。

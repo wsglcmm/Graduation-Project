@@ -115,7 +115,7 @@ class FormationPlanner:
             self._search_phase += self._search_omega(plan.formation.radius_m, t_ns) * (t_ns - self._last_t_ns) / 1e9
         self._last_t_ns = t_ns
         if plan.mode == "capture" and tgt is not None and tgt["status"] != "lost":
-            self.capture.ensure_zone(tgt, drones, self._target_heading(tgt, drones))
+            self.capture.ensure_zone(tgt, drones, self._target_heading(tgt, drones), t_ns / 1e9)
         elif plan.mode != "capture":
             self.capture.reset()
         roles = {a.drone_id: a.role for a in plan.assignments}
