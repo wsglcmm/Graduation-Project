@@ -1,8 +1,55 @@
-# 多機包圍 Demo（鳥瞰圖 + Agent 指令面板）
+# 多機捕捉 Demo（多 Agent、即時指令翻譯、動作驗證）
 
-3 架無人機在 AI Agent 指揮下，合力搜尋、追上、包圍一個移動目標。左邊是鳥瞰圖，右邊是 Agent 指令面板：每一筆計畫都會顯示時間、規劃者（LLM 或規則式）、延遲、模式、各機角色與理由。
+3 架無人機各有一個 AI Agent，由協調 Agent 分派角色（驅趕 / 抓拍 / 封鎖…），合力搜尋、追上、捕捉一個移動目標。
 
-## 執行
+## 最快的開始方式：網頁版畫面
+
+```powershell
+python -m demo.run --web --target evader --strategy capture --drone-speed 5
+```
+
+會自動開瀏覽器到 `http://127.0.0.1:8000/`（Ctrl+C 結束；只用 Python 標準函式庫與單一 HTML 檔，不需要網路）。畫面：
+
+| 區塊 | 內容 |
+|---|---|
+| 即時指令翻譯（右上，主角） | 操作員的自然語言 → 協調 Agent 選的策略與分工 → 每架 Agent 的動作 → ① Agent 決策 ② 飛控指令（GoalPoint；接 A 時加上 A 實際呼叫的 MAVSDK 函式）③ A 的回覆 ④ 驗證，最新在上 |
+| 鳥瞰圖（左上） | 各機位置、航向、相機視野、角色與動作、目標點連線；捕捉區；目標估計與誤差圈、真值；視角自動跟著目前的動態 |
+| 抓拍畫面（鳥瞰圖右上角） | 抓拍成功時，依抓拍判定的像素偏移重建的模擬相機畫面（中央虛線框 = 判定用的中央 20%） |
+| 各機角色卡片（左下） | 角色、目前動作、最近一筆動作的驗證結果與指令一致率、A 的狀態（飛行 / 讓路給誰 / failsafe） |
+| 動作日誌（右下） | 每筆動作的飛控指令、A 的回覆（接受 / 修改 / 拒絕）、指令一致率、驗證結果，顏色：綠 = 通過、橘 = 被 A 修改、紅 = 被拒絕 / 未達成、灰 = 已改派 |
+
+輸入框可以直接打中文，或按下方的常用指令按鈕。終端機同時印出文字紀錄，結束時輸出 `actions.csv`、`drone_events.jsonl` 等。
+
+常用組合：
+
+```powershell
+python -m demo.run --web --target evader --strategy capture --drone-speed 5 --agents single
+python -m demo.run --web --target evader --planner llm --period 5
+python -m demo.run --web --fleet sitl --max-speed 5 --target evader --strategy capture
+```
+
+第一行是單一指揮官（對照組）；第二行是協調 Agent 用 LLM，在輸入框打「把那台車趕進捕捉區抓拍」；第三行接 A 的 SITL（或假伺服器）。
+
+## 多 Agent（協調 Agent + 各機 Agent）
+
+| 層 | 誰 | 決定什麼 | 輸出（白名單） |
+|---|---|---|---|
+| 協調 Agent | `llm_agent/commander.py` | 選策略（搜尋 / 追蹤 / 包圍 / 驅趕抓拍 / 懸停 / 返航）、分派角色 | Plan（規格 §10.5） |
+| 各機 Agent × 3 | `llm_agent/drone_agent.py` | 自己這個角色**現在要怎麼做** | 只能從角色專屬的動作選（`llm_agent/drone_actions.py`） |
+| 確定性規劃器 | `planner/` | 動作 → 目標點、防撞去衝突 | GoalPoint（規格 §10.6） |
+
+角色專屬動作：驅趕機 `push / circle_behind / hold`、抓拍機 `ambush / engage / hold`、封鎖機 `flank / hold`、包圍隊形 `follow_slot / hold`、搜尋 `orbit / hold`。用了別的角色的動作 → 驗證失敗、記入動作日誌、不送出，該架沿用上一個合法動作。
+
+各機 Agent 預設規則式（重現原本規劃器內建的決策，所以多 Agent 版的規則式表現和單一指揮官一樣：驅趕抓拍 10/10、38.9 s）；`--drone-planner llm` 時每架各自呼叫 LLM（角色改變時立刻問，之後每 `--drone-period` 秒），LLM 還沒回來或失敗時先用規則式。3 架 + 協調 Agent 一起用 LLM 時呼叫量是 4 倍，免費額度下 `--drone-period` 建議 ≥ 6。
+
+比較多 Agent 與單一指揮官：
+
+```powershell
+python -m demo.benchmark --scenario evader_capture command_capture --agents single multi --seeds 0 1 2
+python -m demo.benchmark --planner llm --period 5 --agents single multi --drone-planner llm --scenario command_capture --seeds 0
+```
+
+## 執行（matplotlib 視窗版與無畫面模式）
 
 在專案根目錄、`.venv` 啟用的狀態下：
 
