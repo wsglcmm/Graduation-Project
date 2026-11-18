@@ -7,7 +7,7 @@ import pytest
 from fleet_link.messages import GoalPointAck
 from fusion import DroneState
 from ledger import ActionLedger, VerifyConfig
-from llm_agent.commander import AgentEvent
+from llm_agent.commander import AgentEvent, Commander
 
 IDS = ["uav1", "uav2"]
 
@@ -164,3 +164,44 @@ def test_command_consistency_separates_following_from_ignoring():
     a, b = lg.active["uav1"], lg.active["uav2"]
     assert a.command_consistency == 1.0 and b.command_consistency == 0.0
     assert lg.summary()["command_consistency"] == pytest.approx(0.5)
+
+
+# ---------- 多 Agent：每架 Agent 的每個動作一筆 ----------
+from llm_agent.team import Team  # noqa: E402
+from planner import CaptureZone  # noqa: E402
+
+S = 1_000_000_000
+IDS3 = ["uav1", "uav2", "uav3"]
+DRONES = [DroneState("uav1", -20, 0, 25), DroneState("uav2", 5, -15, 30), DroneState("uav3", 5, 15, 35)]
+ZONE = CaptureZone(35.0, 0.0, 10.0)
+
+
+def target(n=0.0, e=0.0, status="tracking"):
+    return {"target_id": 1, "class": "car", "status": status, "position_world_ned_m": {"n": n, "e": e, "d": 0.0},
+            "velocity_world_ned_mps": {"n": 0.0, "e": 0.0, "d": 0.0}, "uncertainty_m": 1.0, "observed_by": ["uav1"],
+            "last_seen_ns": 0}
+
+
+def test_ledger_per_drone_actions():
+    team = Team(Commander(IDS3, llm=None, strategy="capture"))
+    lg = ActionLedger(per_drone=True)
+    evs = team.tick(0, DRONES, [target()], zone=ZONE)
+    for ev in evs:
+        lg.on_event(ev, 0.0)
+    for dev in team.new_drone_events:
+        lg.on_drone_event(dev, 0.0)
+    assert {r.agent_id for r in lg.records} == {"agent_uav1", "agent_uav2", "agent_uav3"}
+    cap = next(r for r in lg.records if r.role == "capturer")
+    assert cap.action == "ambush" and cap.plan_ids
+    # 抓拍 Agent 改成 engage：舊動作 overridden，開新動作
+    evs = team.tick(int(0.5 * S), DRONES, [target(n=20.0)], zone=ZONE)
+    for dev in team.new_drone_events:
+        lg.on_drone_event(dev, 0.5)
+    assert cap.result == "overridden" and "engage" in cap.why
+    assert lg.active[cap.drone_id].action == "engage"
+    # 不合法的各機決策：記 rejected，不影響目前動作
+    from llm_agent.drone_agent import DroneAgentEvent
+    lg.on_drone_event(DroneAgentEvent(0, cap.drone_id, "agent_x", "capturer", "capture", "periodic", "llm", 900.0, False,
+                                      None, None, error="capturer 不能用 push"), 1.0)
+    assert lg.records[-1].result == "rejected" and lg.active[cap.drone_id].action == "engage"
+    team.close()

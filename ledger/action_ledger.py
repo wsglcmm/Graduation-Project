@@ -4,6 +4,8 @@
 
 一筆「動作」= 一架無人機在一段時間內的任務（mode、role、target 不變）。Agent 每 2 秒重新規劃，
 但角色沒變時不開新動作，只把 plan_id 接在後面，否則每筆動作都還沒驗證就被下一筆取代。
+多 Agent 模式（per_drone=True）：一筆動作 = 一架的 Agent 選的一個動作（例如 uav3 的抓拍 Agent 選 engage），
+協調 Agent 的計畫只負責結束角色改變的動作，新動作由各機 Agent 的決策開啟。
 
 每筆動作的驗證鏈（全部可匯出查核）：
     1. 白名單驗證       Agent 輸出是否通過 schema（不合法 → rejected，不送出）
@@ -80,6 +82,9 @@ class ActionRecord:
     valid: bool
     validation_error: Optional[str]
     t_start_s: float
+    agent_id: Optional[str] = None  # 多 Agent：哪一架的 Agent 做的決策（agent_uav1…）；單一指揮官為 coordinator
+    action: Optional[str] = None  # 多 Agent：各機 Agent 選的動作（engage、push…）；單一指揮官為 None
+    decision_id: Optional[str] = None
     deadline_s: Optional[float] = None
     t_end_s: Optional[float] = None
     # 2. 對應飛控指令
@@ -130,8 +135,10 @@ class ActionRecord:
 
 
 class ActionLedger:
-    def __init__(self, cfg: VerifyConfig = VerifyConfig()):
+    def __init__(self, cfg: VerifyConfig = VerifyConfig(), per_drone: bool = False):
         self.cfg = cfg
+        self.per_drone = per_drone
+        self._plan_ctx: Dict[str, dict] = {}  # 多 Agent：drone_id → 目前協調 Agent 分派的角色與計畫資訊
         self.records: List[ActionRecord] = []
         self.active: Dict[str, ActionRecord] = {}  # drone_id → 進行中的動作
         self._by_plan: Dict[tuple, ActionRecord] = {}  # (plan_id, drone_id) → 動作（遲到的 ack 用）
@@ -154,6 +161,9 @@ class ActionLedger:
                                    t_s, t_end_s=t_s, result="cancelled", why="套用前就被操作員的新指令取代"))
             return
         stop = plan["mode"] in OPERATOR_STOP_MODES and ev.trigger == "operator"
+        if self.per_drone:
+            self._on_plan_per_drone(ev, plan, stop, t_s)
+            return
         for a in plan["assignments"]:
             did = a["drone_id"]
             key = (plan["mode"], a["role"], plan.get("target_id"))
@@ -167,10 +177,50 @@ class ActionLedger:
                             "操作員指令中斷" if stop else f"Agent 改派為 {plan['mode']} / {a['role']}")
             rec = ActionRecord(self._next_id(did), did, a["role"], plan["mode"], plan.get("target_id"), [ev.plan_id],
                                ev.planner, ev.trigger, ev.operator_command, plan["reason"], ev.latency_ms, ev.model, True,
-                               None, t_s)
+                               None, t_s, agent_id="coordinator")
             self._add(rec)
             self.active[did] = rec
             self._by_plan[(ev.plan_id, did)] = rec
+
+    def _on_plan_per_drone(self, ev, plan: dict, stop: bool, t_s: float) -> None:
+        """多 Agent：協調 Agent 的計畫只結束「角色改變」的動作；新動作等該架的 Agent 決定。"""
+        for a in plan["assignments"]:
+            did = a["drone_id"]
+            ctx = {"plan_id": ev.plan_id, "mode": plan["mode"], "role": a["role"], "target_id": plan.get("target_id"),
+                   "planner": ev.planner, "trigger": ev.trigger, "operator_command": ev.operator_command,
+                   "reason": plan["reason"], "latency_ms": ev.latency_ms, "model": ev.model, "stop": stop}
+            self._plan_ctx[did] = ctx
+            cur = self.active.get(did)
+            if cur is not None and (cur.mode, cur.role, cur.target_id) == (ctx["mode"], ctx["role"], ctx["target_id"]):
+                cur.plan_ids.append(ev.plan_id)
+                self._by_plan[(ev.plan_id, did)] = cur
+            elif cur is not None:
+                self._close(cur, t_s, "cancelled" if stop else "overridden",
+                            "操作員指令中斷" if stop else f"協調 Agent 改派為 {plan['mode']} / {a['role']}")
+
+    def on_drone_event(self, dev, t_s: float) -> None:
+        """各機 Agent 的決策（llm_agent.drone_agent.DroneAgentEvent）。不合法 → rejected；動作改變 → 開新動作。"""
+        ctx = self._plan_ctx.get(dev.drone_id, {})
+        if not dev.valid:
+            self._add(ActionRecord(self._next_id(dev.drone_id), dev.drone_id, dev.role, dev.mode, ctx.get("target_id"), [],
+                                   dev.planner, dev.trigger, None, None, dev.latency_ms, dev.model, False, dev.error, t_s,
+                                   agent_id=dev.agent_id, decision_id=dev.decision_id, t_end_s=t_s, result="rejected",
+                                   why=f"角色白名單驗證失敗，未送出（沿用上一個動作）：{dev.error}"))
+            return
+        cur = self.active.get(dev.drone_id)
+        key = (dev.mode, dev.role, ctx.get("target_id"), dev.action)
+        if cur is not None and (cur.mode, cur.role, cur.target_id, cur.action) == key:
+            return
+        if cur is not None:
+            self._close(cur, t_s, "overridden", f"{dev.agent_id} 改為 {dev.action}")
+        rec = ActionRecord(self._next_id(dev.drone_id), dev.drone_id, dev.role, dev.mode, ctx.get("target_id"),
+                           [ctx["plan_id"]] if ctx.get("plan_id") else [], dev.planner, dev.trigger,
+                           ctx.get("operator_command"), dev.reason, dev.latency_ms, dev.model, True, None, t_s,
+                           agent_id=dev.agent_id, action=dev.action, decision_id=dev.decision_id)
+        self._add(rec)
+        self.active[dev.drone_id] = rec
+        if ctx.get("plan_id"):
+            self._by_plan[(ctx["plan_id"], dev.drone_id)] = rec
 
     # ---------- 2. 對應飛控指令 ----------
     def on_goals(self, goals: Sequence[dict], adjustments: Iterable = (), drones: Sequence = (), t_s: Optional[float] = None) -> None:
@@ -309,7 +359,7 @@ class ActionLedger:
         with open(out_dir / "actions.jsonl", "w", encoding="utf-8") as f:
             for r in rows:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        cols = ["action_id", "t_start_s", "t_end_s", "drone_id", "role", "mode", "target_id", "planner", "trigger",
+        cols = ["action_id", "t_start_s", "t_end_s", "drone_id", "agent_id", "role", "action", "mode", "target_id", "planner", "trigger",
                 "operator_command", "valid", "goals_sent", "c_adjustments", "acks", "accepted", "adjusted", "rejected",
                 "time_to_reach_s", "track_err_mean_m", "track_err_p95_m", "command_consistency", "result", "status_zh",
                 "why", "reason"]
