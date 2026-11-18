@@ -45,6 +45,10 @@ class SitlFleet:
         if math.isfinite(h):
             self.min_pair_horizontal_m = min(self.min_pair_horizontal_m, h)
 
+    def drain_acks(self) -> list:
+        """A 對 GoalPoint 的回覆（動作日誌用）；替身 FleetSim 沒有這個方法。"""
+        return self.link.drain_acks()
+
     def start_positions(self) -> Dict[str, tuple]:
         """目前各機位置（n, e, alt），給隊形規劃當 home。"""
         return {s.drone_id: (s.n, s.e, s.alt_m) for s in self.states()}

@@ -89,6 +89,7 @@ class FleetLink:
         self.active_yields: Dict[str, YieldEvent] = {}  # drone_id → 進行中的讓路（start 還沒收到 end）
         self.yield_log: Deque[YieldEvent] = deque(maxlen=500)
         self.action_log: Deque[ActionResult] = deque(maxlen=500)
+        self._ack_queue: Deque[GoalPointAck] = deque(maxlen=5000)  # 給動作日誌逐筆讀取（drain_acks）
 
     # ---------- 連線 ----------
     def start(self) -> "FleetLink":
@@ -202,6 +203,7 @@ class FleetLink:
             self.stats.rtt_ms.append((time.monotonic() - self._sent_at.popleft()) * 1000)
         for raw in acks:
             a = GoalPointAck.model_validate(raw)
+            self._ack_queue.append(a)
             self.stats.acks += 1
             if not a.accepted:
                 self.stats.rejected += 1
@@ -236,6 +238,13 @@ class FleetLink:
         with self._lock:
             self.action_log.append(r)
         self.stats.action_results[r.result] = self.stats.action_results.get(r.result, 0) + 1
+
+    def drain_acks(self) -> List[GoalPointAck]:
+        """取出上次呼叫之後收到的所有 GoalPointAck（動作日誌用）。"""
+        out = []
+        while self._ack_queue:
+            out.append(self._ack_queue.popleft())
+        return out
 
     def yielding(self) -> Dict[str, Optional[str]]:
         """目前正在讓路的無人機 → 讓給誰（面板的「誰在讓誰」）。"""
