@@ -156,20 +156,24 @@ ssh -N -L 8765:127.0.0.1:8765 帳號@伺服器位址
 ```powershell
 python -m demo.run --fleet sitl
 python -m demo.run --fleet sitl --planner llm --period 5
+python -m demo.run --fleet sitl --max-speed 5 --target evader --strategy capture
 ```
 
-還在地上的話會先送 takeoff，等三架都到高度層（約 25 秒）再開始。結束時會印出連線統計：收到幾則 FleetPose、送出幾個 GoalPoint、被 A 修改或拒絕幾次與最近的原因、ack 來回延遲。
+`--max-speed` 要和 A 啟動 `agent_server.py --max-speed` 的值相同（預設 3 m/s）。
+
+還在地上的話會先送 takeoff，等三架都到高度層（約 25 秒）再開始。結束時會印出連線統計：收到幾則 FleetPose、送出幾個 GoalPoint、被 A 修改或拒絕幾次與最近的原因、ack 來回延遲，以及 A 的讓路次數（`yields`）與動作結果（`action_results`，規格 §10.8）。
 
 **沒有學校伺服器時**：`fleet_link/fake_server.py` 模仿 A 的協定與安全規則（高度層 25 / 30 / 35 m、目標點推開 6 m、±80 m、速度上限 3 m/s、1 s 沒收到目標點就懸停、3 s 沒任何訊息全部懸停），可以先在自己電腦上測：
 
 ```powershell
 python -m fleet_link.fake_server
+python -m fleet_link.fake_server --max-speed 5 --default-speed 5
 ```
 
 另開一個終端機跑 `python -m demo.run --fleet sitl`。
 
 注意：
 - 連 SITL 時一律照真實時間跑，不能快轉。
-- 隊形規劃的目標點速度會自動限制在 A 的上限（3 m/s）。上限比內建替身的 8 m/s 低很多，追 2～5 m/s 的目標時包圍時間比例會明顯下降，這是要和 A 討論的事項。
-- A 在 11/10 新增的讓路（yield）欄位會照收，但 C 目前不依賴；等規格 §10.8 定案再接到面板。
+- 隊形規劃的目標點速度會自動限制在 `--max-speed`。實測（規則式、10 seeds）追 2～5 m/s 的兔子：3 m/s 時包圍時間比例 14%、5 m/s 47%、8 m/s 74%。
+- 規格 §10.8 的執行狀態都會收下來，只記錄、不影響控制：ack 的 `flight_command`（A 實際呼叫的 MAVSDK 函式，`FleetLink.last_flight_command`）、讓路事件（`FleetLink.yielding()` 給面板顯示「誰在讓誰」）、`ActionResult`（`FleetLink.action_log`）。假伺服器會回 `flight_command`，不會產生讓路事件。
 

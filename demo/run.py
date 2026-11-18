@@ -225,14 +225,14 @@ SITL_HINT = ("檢查：(1) 用假伺服器測試時，要先在另一個終端�
              "(3) --uri 是否正確")
 
 
-def connect_sitl(uri: str, commander: Commander):
+def connect_sitl(uri: str, commander: Commander, max_speed_mps: float = 3.0):
     """連 A 的 agent_server 並確認 3 架都在空中。失敗時印一行原因 + 檢查清單後結束，不印 traceback。"""
     from fleet_link import FleetLink, LinkError, SitlFleet
 
     link = None
     try:
         link = FleetLink(uri).start()
-        fleet = SitlFleet(link)
+        fleet = SitlFleet(link, max_speed_mps=max_speed_mps)
         fleet.ensure_airborne(commander.drone_ids)
     except LinkError as e:
         if link is not None:
@@ -256,6 +256,8 @@ def main(argv=None):
     ap.add_argument("--fleet", choices=("sim", "sitl"), default="sim",
                     help="sim = 內建替身；sitl = 連 A 的 3 架 SITL（agent_server，或 python -m fleet_link.fake_server）")
     ap.add_argument("--uri", default="ws://127.0.0.1:8765", help="A 的 agent_server 位址（--fleet sitl 時使用）")
+    ap.add_argument("--max-speed", type=float, default=3.0,
+                    help="A 的速度上限 m/s（--fleet sitl 時使用），要和 A 的 agent_server --max-speed 相同")
     ap.add_argument("--target", choices=("rabbit", "evader"), default="rabbit",
                     help="rabbit = 不理無人機的兔子路線；evader = 會逃的目標（策略場景，驅趕才有意義）")
     ap.add_argument("--strategy", choices=("encircle", "capture"), default="encircle", help="規則式的預設策略：包圍 / 驅趕抓拍")
@@ -269,7 +271,7 @@ def main(argv=None):
     commander = make_commander(args.planner, args.period, args.strategy)
     link, fleet = None, None
     if args.fleet == "sitl":
-        link, fleet = connect_sitl(args.uri, commander)
+        link, fleet = connect_sitl(args.uri, commander, args.max_speed)
     evader = EvaderConfig(seed=args.seed) if args.target == "evader" else None
     speed = args.drone_speed or (3.0 if evader is not None else None)
     engine = DemoEngine(cam, err, commander, rabbit=RabbitConfig(seed=args.seed), seed=args.seed, fleet=fleet,
