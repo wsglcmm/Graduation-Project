@@ -1,6 +1,6 @@
 # 模組介面規格（Interface Specification）
 
-- 版本：`0.2.4`（§10.8 新增 A → C 執行狀態：flight_command、ActionResult、Yield；§10.2 / §10.6 時間戳的時鐘；§10.6 速度上限改為啟動參數、地面站失聯行為；§10.6 機間安全距離改寫：3D ≥ 5 m、目標點推開 6 m；§2.4 參考點改為中心 + 半高平面；§10 多機與影片 Demo 介面：A 已於 2026-11-01 合併 PR #3，同意 §10.1 local ↔ world 由 A 轉換、§10.6 目標點逾時與安全距離；§10.3 影片 Detection 待 B 確認）
+- 版本：`0.2.5`（§10.5 新增捕捉策略 `capture` 模式與 `herder` / `capturer` / `blocker` 角色；新增 §10.9 各機 Agent 動作、§10.10 抓拍判定、§10.11 動作日誌；§10.3 影片場景的 track_id 與地面標定。以上都是 C 內部格式，A、B 的訊息沒有變動。v0.2.4：§10.8 新增 A → C 執行狀態：flight_command、ActionResult、Yield；§10.2 / §10.6 時間戳的時鐘；§10.6 速度上限改為啟動參數、地面站失聯行為；§10.6 機間安全距離改寫：3D ≥ 5 m、目標點推開 6 m；§2.4 參考點改為中心 + 半高平面；§10 多機與影片 Demo 介面：A 已於 2026-11-01 合併 PR #3，同意 §10.1 local ↔ world 由 A 轉換、§10.6 目標點逾時與安全距離；§10.3 影片 Detection 待 B 確認）
 - §3–§7 的單機訊息 `schema_version` 仍為 `"0.1.0"`；§10 的新訊息為 `"0.2.0"`
 - 維護者：C
 - 適用範圍：B（影像辨識）→ C（座標轉換 / LLM Agent）→ A（模擬 / 飛控）
@@ -413,6 +413,9 @@ LLM 不直接輸出底層控制量，只能從下列**白名單動作**中選擇
 
 - `source = "video"` 時，`timestamp_ns` = **影片時間**（從影片開頭起算的奈秒），`image_width / image_height` = 影片解析度。影片時間與模擬時間的對應由 C 的 Demo 播放器負責。
 - 影片偵測由 C 用地面標定（homography）換成 world 座標，不使用 §5 的相機模型。
+- **影片場景需要 `track_id`**（2026-11-18 補充）：同一台車在整支影片中要維持同一個 `track_id`（B 的 ByteTrack 輸出）。C 用它把每一幀的地面座標串成一條軌跡，再選一條當 Demo 目標。B 還沒提供時，C 會先用地面座標最近鄰做暫代關聯（只為了接通流程，畫面會標示；報告與評估以 B 的 `track_id` 為準）。
+- 影片場景的地面參考點：bbox **底邊中點**（§2.4）。
+- 地面標定檔（C 維護，`config/video_ground_<video_id>.json`）：`{"video_id": "...", "points": [{"pixel": [u, v], "ground_ne_m": [n, e]}, ...]}`，至少 4 點（建議 ≥ 6 點、分散在畫面四角，才能用重投影 RMS 檢查標錯），由 C 的標定工具產生。
 
 ### 10.4 FusedTarget（C 內部 → Agent / 面板）
 
@@ -449,13 +452,26 @@ LLM 只輸出下列 JSON，C 以 pydantic strict schema 驗證，不合法就丟
 
 | 欄位 | 規則 |
 |---|---|
-| `mode` | `search` / `track` / `encircle` / `hold` / `return_home` |
-| `target_id` | `track`、`encircle` 必填，且必須是目前存在的目標 |
-| `assignments` | 每架無人機恰好出現一次；`role` 為 `chaser` / `blocker_left` / `blocker_right` / `overwatch` / `searcher` / `idle` |
+| `mode` | `search` / `track` / `encircle` / `capture` / `hold` / `return_home` |
+| `target_id` | `track`、`encircle`、`capture` 必填，且必須是目前存在的目標 |
+| `assignments` | 每架無人機恰好出現一次；`role` 為 `chaser` / `blocker_left` / `blocker_right` / `overwatch` / `searcher` / `idle` / `herder` / `capturer` / `blocker` |
+| `capture` 的角色 | 只能用 `herder` / `capturer` / `blocker` / `overwatch`；**恰好一架 `capturer`、至少一架 `herder`**。`herder` / `capturer` / `blocker` 只能在 `capture` 使用 |
 | `formation.radius_m` | 5–60 m（包圍或跟隨半徑；預設 15） |
 | `reason` | 必填，≤ 80 字，顯示在 Agent 指令面板 |
 
 `plan_id`、時間戳與延遲由 C 加上，不由 LLM 產生。單機的 §7 白名單維持不變，供單機測試使用。
+
+**捕捉策略 `capture`**（2026-11-18 新增，老師 11/16 建議 3）：
+
+| 角色 | 中文 | 做什麼 |
+|---|---|---|
+| `herder` | 驅趕機 | 從目標後方 / 側方施壓，把目標趕向捕捉區 |
+| `capturer` | 抓拍機 | 先到捕捉區伏擊，目標靠近時迎上去，讓目標進入自己相機畫面中央 |
+| `blocker` | 封鎖機 | 守住目標偏離方向的側翼（和驅趕機形成 V 字） |
+
+- **捕捉區**（capture zone）由 C 的確定性規劃器決定，不由 LLM 輸出：中心在目標前方 35 m（預設方向為「機群中心 → 目標」的延長線），半徑 10 m，離場地邊界至少 12 m；同一次 capture 期間固定不動。影片場景的目標不會反應，捕捉區放在目標前進的方向，目標轉彎（夾角 > 60°）時每 3 s 重新預測。
+- 同一次 capture 期間沿用同一組角色（不會每次重算就換人）；換目標、操作員下新指令或角色交接時才重新分派。
+- 「驅趕成功」：目標進入捕捉區（`zone_entered_at_s`）。「抓拍成功」見 §10.10。
 
 ### 10.6 GoalPoint（C → A，各機目標點，5–10 Hz）
 
@@ -552,6 +568,87 @@ AgentEvent 只在 C 內部使用（面板與報告指標），A、B 不需要實
 - A 實測 5 m/s 上下錯開時 3D 最近 4.94 m，低於 §10.6「任何時刻 3D ≥ 5 m」6 cm，需要 A 決定是放寬容許誤差還是加大讓路距離。
 - §7 的 Action 請求格式還是初版（`follow`、`hover`、`search`…）；A 的實作已有 `move_to`、`follow`、`encircle`、`agent_id`、`role`（`tracker`、`guard`…），請 A 提供目前的 Action 請求格式後更新 §7，並和 C 的捕捉策略角色（`herder`、`capturer`、`blocker`）對齊。
 
+### 10.9 各機 Agent 動作 DroneAction（C 內部，2026-11-18 新增）
+
+老師 11/16 建議 2、3：每架無人機有自己的 Agent。協調 Agent（§10.5）選策略、分派角色；**各機 Agent 只從自己角色的白名單選一個動作**，不輸出座標或速度。座標由 C 的確定性規劃器算出，再以 GoalPoint（§10.6）送給 A。
+
+```json
+{"action": "engage", "reason": "目標離捕捉區 15 m，迎上去抓拍"}
+```
+
+| 欄位 | 規則 |
+|---|---|
+| `action` | 必須在下表「該架目前角色」的白名單內 |
+| `reason` | 必填，1–60 字，顯示在即時指令翻譯面板 |
+
+`drone_id`、角色、時間戳由 C 的程式填入，Agent 無法冒充別架或改自己的角色。schema 版本 `"0.3.0"`。
+
+| 角色 | 動作白名單 | 對應的 GoalPoint（C 的規劃器） |
+|---|---|---|
+| `herder` | `push` / `circle_behind` / `hold` | `push`：目標後方 12 m（捕捉區的反方向）；`circle_behind`：目標側方 18 m（繞到後方途中，避免把目標往反方向趕） |
+| `capturer` | `ambush` / `engage` / `hold` | `ambush`：捕捉區中心；`engage`：目標位置 + 速度 × 1 s |
+| `blocker` | `flank` / `hold` | 目標側後方 14 m，邊依目標偏離方向決定 |
+| `chaser` / `blocker_left` / `blocker_right` | `follow_slot` / `hold` | 包圍隊形位置（§10.5 `formation.radius_m`） |
+| `overwatch` | `overwatch` / `hold` | 目標正上方，該架高度層再加 10 m |
+| `searcher` | `orbit` / `hold` | 繞圈搜尋 |
+| `idle` | `hold` | 原地懸停 |
+
+- 每個角色都可以選 `hold`（原地懸停，在選定當下的位置），這是 Agent 能做的最保守選擇。
+- 不合法（格式錯、用了別的角色的動作、逾時）→ **不送出**、記入動作日誌（§10.11，`valid = false`），該架沿用上一個合法動作；沒有合法動作時用規則式。LLM 延遲或失效時無人機不會失控。
+- 動作送出前，C 的規劃器先做去衝突（目標點水平 ≥ 6 m；預測飛行途中最近距離 < 8 m 時，低優先權角色橫移讓路，`capturer` 優先權最高），A 的安全層最後把關（§10.6、§10.8）。防撞不交給 LLM。
+- 各機 Agent 的決策頻率約每 6 s 一次（或角色、情況改變時），協調 Agent 約每 2 s；GoalPoint 由規劃器以 10 Hz 更新。
+
+### 10.10 抓拍判定（C 內部，2026-11-18 新增）
+
+C 用每架的模擬相機（§6 的內參、該架的位姿與相機安裝角）把目標的**真值**位置投影到影像上，以下條件**同時連續成立 2 s** 即判定該架抓拍成功：
+
+| 條件 | 預設 |
+|---|---|
+| 目標中心在影像中央區域 | 中央 20% × 20%（30 m 高時地面約 ±5 m × ±7 m） |
+| 目標在影像上的尺寸 | ≥ 40 px（以車長 4.5 m 投影；行人約 0.5–0.6 m） |
+| 持續時間 | 2 s |
+
+- 用真值而不是估計值：判定的是「相機畫面裡是否真的拍到」，和 C 的估計誤差無關。
+- 任何一架符合都會記錄（`capture_events`：時間、哪一架、角色、像素偏移、像素尺寸）；報告的「抓拍成功時間」以 `capturer` 完成的第一次為準（`time_to_capture_by_capturer_s`）。
+- 影片場景的「真值」是影片中目標經地面標定後的位置。
+
+### 10.11 動作日誌 ActionRecord（C 內部，2026-11-18 新增）
+
+老師 11/16 建議 4：每個動作都要記錄、可驗證，且能對應到實際的飛控指令。每一筆記錄一個 Agent 動作的完整鏈：
+
+```
+Agent 動作 → 白名單驗證 → 對應的 GoalPoint（含 C 的去衝突修改）→ A 的 ack 與實際 MAVSDK 呼叫 → 實際位姿是否在期限內達成
+```
+
+| 欄位 | 說明 |
+|---|---|
+| `action_id` | `uav1-0007`（多 Agent）/ `plan-0003`（單一指揮官） |
+| `drone_id` / `agent_id` / `role` / `mode` / `target_id` | 哪一架、哪個 Agent（`agent_uav1`…；單一指揮官為 `coordinator`）、角色、模式、目標 |
+| `action` / `reason` / `planner` / `latency_ms` / `model` | 動作、理由、`llm` / `rule`、延遲、LLM 模型 |
+| `valid` / `validation_error` | 白名單驗證結果；不合法的動作不送出 |
+| `goals_sent` / `last_goal_ned` / `c_adjustments` | 送出的 GoalPoint 數、最後一個目標點（world_ned）、C 的去衝突修改次數 |
+| `acks` / `accepted` / `adjusted` / `rejected` / `last_ack_reason` | A 的 GoalPointAck 統計與原因（照實記錄，不重送繞過 A） |
+| `flight_command` | A 實際呼叫的 MAVSDK 函式（§10.8(a)） |
+| `t_start_s` / `deadline_s` / `t_end_s` / `time_to_reach_s` | 開始、期限、結束、到達所需時間（s，C 的時鐘） |
+| `track_err_mean_m` / `track_err_p95_m` | 跟隨目標點的水平誤差 |
+| `command_consistency` | 指令一致率：無人機速度方向與「指向目標點的方向」夾角 < 45°（或已到達）的時間比例 |
+| `result` / `why` | 結果（用語同 A 的 ActionResult，§10.8）與原因 |
+
+**`result` 的判定**：
+
+| `result` | 條件 |
+|---|---|
+| `succeeded` | 目標點不動時：水平 1.5 m、垂直 1.0 m 內（同 A 的 `move_to`）；目標點在動時：水平 1.5 m + 目標點速度 × 1 s 內，連續 2 s |
+| `failed` | 期限內沒有達成。期限 = max(8 s, 距離 / 速度上限 × 1.5 + 5 s) |
+| `rejected` | A 拒絕，且之後沒有任何一則被接受 |
+| `overridden` | 還沒判定前就被新的動作或計畫取代（不列入通過率） |
+| `cancelled` | Demo 結束時仍在進行（不列入通過率） |
+
+- 面板顯示：通過（`succeeded`）/ 被 A 修改（`succeeded` 但 `adjusted > 0`）/ 被拒絕 / 未達成 / 已改派 / 已取消 / 進行中。
+- **動作驗證通過率** = `succeeded` /（`succeeded` + `failed` + `rejected`）。
+- 輸出：`actions.jsonl`（完整）、`actions.csv`（UTF-8 BOM，Excel 可直接開）；各機 Agent 每次決策另記 `drone_events.jsonl`。
+- 動作日誌只記錄、不改寫。A、B 不需要實作。
+
 ---
 
 ## 11. 變更紀錄
@@ -566,3 +663,4 @@ AgentEvent 只在 C 內部使用（面板與報告指標），A、B 不需要實
 | 0.2.2 | 2026-11-02 | §2.4、§5：相機模型流程的 bbox 參考點由「底邊中點」改為「中心 + 半高平面」（依 Phase 2 實驗 5：nadir 看車最大誤差 3.4 m → 0.1 m 以下）；影片 homography 流程維持底邊中點。A、B 的訊息格式沒有變動 | C |
 | 0.2.3 | 2026-11-11 | §10.6：機間安全距離改寫為「任何時刻 3D ≥ 5 m」，並記錄 A 的實作：目標點推開距離 6 m（11/10 由 5 m 調整）、高度分層、飛行範圍 ±80 m、速度上限 3 m/s。訊息格式沒有變動 | C |
 | 0.2.4 | 2026-11-18 | 依 A 11/18 回覆：§10.2 FleetPose 時間戳為 PX4 / 模擬時鐘（三架同源）、§10.6 GoalPoint 時間戳為 C 的時鐘（兩者不能相減）；§10.6 速度上限改為 A 的啟動參數、地面站失聯改為原地懸停 → 30 s 後原地降落、GoalPointAck 欄位；新增 §10.8 執行狀態（`flight_command`、`ActionResult`、`Yield`）與 11/10 近距離事件說明。C 依此新增解析，A 的既有訊息沒有破壞性變動 | A（C 代為整理） |
+| 0.2.5 | 2026-11-18 | 老師 11/16 建議（多 Agent、捕捉策略、動作可驗證）：§10.5 新增 `capture` 模式與 `herder` / `capturer` / `blocker` 角色、捕捉區；新增 §10.9 各機 Agent 動作白名單、§10.10 抓拍判定、§10.11 動作日誌；§10.3 補充影片場景需要 B 的 `track_id` 與地面標定檔格式。都是 C 內部格式，A、B 的訊息沒有變動 | C |
