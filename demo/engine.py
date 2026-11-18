@@ -122,7 +122,9 @@ class DemoEngine:
         sim_cfg = FleetSimConfig(max_speed_mps=drone_max_speed_mps) if drone_max_speed_mps else FleetSimConfig()
         self.sim = fleet if fleet is not None else FleetSim(start, sim_cfg)
         self.judge = CaptureJudge(cam, capture_criteria)
-        self.ledger = ActionLedger(VerifyConfig(max_speed_mps=cfg.max_speed_mps))
+        self.multi = hasattr(commander, "actions")  # llm_agent.team.Team：協調 Agent + 各機 Agent
+        self.ledger = ActionLedger(VerifyConfig(max_speed_mps=cfg.max_speed_mps), per_drone=self.multi)
+        self.new_drone_events: list = []
         self.new_captures: list = []
         self.metrics = Metrics()
         self.target_state: Optional[dict] = None
@@ -139,12 +141,20 @@ class DemoEngine:
         fused = fuse(self.observations)
         self.target_state = self.tracker.step(self.t_ns, fused[0] if fused else None)
         targets = [self.target_state] if self.target_state else []
-        events = self.commander.tick(self.t_ns, drones, targets)
         t_s = self.t_ns / S
+        if self.multi:
+            events = self.commander.tick(self.t_ns, drones, targets, zone=self.planner.capture_zone)
+            self.new_drone_events = self.commander.new_drone_events
+        else:
+            events = self.commander.tick(self.t_ns, drones, targets)
         for ev in events:
             self.ledger.on_event(ev, t_s)
+        for dev in self.new_drone_events:
+            self.ledger.on_drone_event(dev, t_s)
         if self.commander.current is not None:
-            self.goals = self.planner.goal_points(self.commander.current, self.commander.current_id, drones, targets, self.t_ns)
+            actions = self.commander.actions() if self.multi else None
+            self.goals = self.planner.goal_points(self.commander.current, self.commander.current_id, drones, targets,
+                                                  self.t_ns, actions)
             self.sim.apply_goals(self.goals, self.t_ns)
             self.ledger.on_goals(self.goals, self.planner.last_adjustments, drones, t_s)
         self.sim.step(self.dt, self.t_ns)
@@ -191,4 +201,11 @@ class DemoEngine:
         out["actions"] = self.ledger.summary()
         out["action_pass_rate"] = out["actions"]["action_pass_rate"]
         out["command_consistency"] = out["actions"]["command_consistency"]
+        out["agents"] = "multi" if self.multi else "single"
+        if self.multi:
+            devs = self.commander.drone_events
+            llm = [d for d in devs if d.planner == "llm"]
+            out["drone_agent_decisions"] = len(devs)
+            out["drone_agent_llm_valid_rate"] = sum(d.valid for d in llm) / len(llm) if llm else None
+            out["drone_agent_llm_latency_ms_mean"] = sum(d.latency_ms for d in llm) / len(llm) if llm else None
         return out

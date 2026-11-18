@@ -37,3 +37,12 @@ def test_benchmark_cli_rule_planner(tmp_path):
     assert (tmp_path / "runs.csv").exists() and "| hold_resume | 1 |" in (tmp_path / "summary.md").read_text(encoding="utf-8")
     m = json.loads((tmp_path / "runs" / "return_home_s0" / "metrics.json").read_text(encoding="utf-8"))
     assert m["scenario"] == "return_home"
+
+
+def test_benchmark_compares_single_and_multi_agent(tmp_path):
+    results = main(["--scenario", "evader_capture", "--seeds", "0", "--agents", "single", "multi", "--out", str(tmp_path)])
+    assert [r["scenario"] for r in results] == ["evader_capture", "evader_capture［多 Agent］"]
+    assert results[1]["agents"] == "multi" and results[1]["drone_agent_decisions"] > 0
+    assert results[0]["time_to_capture_by_capturer_s"] is not None and results[1]["time_to_capture_by_capturer_s"] is not None
+    assert (tmp_path / "runs" / "evader_capture_multi_s0" / "metrics.json").exists()
+    assert "［多 Agent］" in (tmp_path / "summary.md").read_text(encoding="utf-8")

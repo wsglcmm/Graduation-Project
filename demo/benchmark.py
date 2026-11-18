@@ -76,13 +76,14 @@ def operator_metrics(events, commands) -> dict:
             "operator_commands_answered": f"{len(responses)}/{len(commands)}"}
 
 
-def run_once(scn: Scenario, seed: int, planner: str, period_s: float, cam, err, out_dir: Optional[Path] = None) -> dict:
-    commander = make_commander(planner, period_s, scn.strategy)
+def run_once(scn: Scenario, seed: int, planner: str, period_s: float, cam, err, out_dir: Optional[Path] = None,
+             agents: str = "single", drone_planner: str = "rule") -> dict:
+    commander = make_commander(planner, period_s, scn.strategy, agents, drone_planner)
     evader = EvaderConfig(seed=seed) if scn.target == "evader" else None
     engine = DemoEngine(cam, err, commander, rabbit=RabbitConfig(seed=seed), seed=seed, evader=evader,
                         drone_max_speed_mps=3.0 if evader is not None else None)  # 策略場景用 A 的速度上限
     scripted = sorted(scn.commands)
-    realtime = planner == "llm"  # LLM 要照真實時間跑，延遲才有意義
+    realtime = planner == "llm" or (agents == "multi" and drone_planner == "llm")  # LLM 要照真實時間跑，延遲才有意義
     try:
         for _ in range(int(round(scn.duration_s / engine.dt))):
             t0 = time.monotonic()
@@ -99,10 +100,16 @@ def run_once(scn: Scenario, seed: int, planner: str, period_s: float, cam, err, 
     if scn.reencircle_from_s is not None:
         later = [t for t in m["encircle_onsets_s"] if t >= scn.reencircle_from_s]
         m["reencircle_s"] = later[0] - scn.reencircle_from_s if later else None
-    m.update({"scenario": scn.name, "seed": seed, "planner": planner})
+    label = scn.name if agents == "single" else f"{scn.name}［多 Agent］"
+    m.update({"scenario": label, "scenario_base": scn.name, "seed": seed, "planner": planner, "agents": agents})
     if out_dir is not None:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "metrics.json").write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+        engine.ledger.write(out_dir)
+        if engine.multi:
+            with open(out_dir / "drone_events.jsonl", "w", encoding="utf-8") as f:
+                for dev in commander.drone_events:
+                    f.write(json.dumps(dev.to_dict(), ensure_ascii=False) + "\n")
         with open(out_dir / "events.jsonl", "w", encoding="utf-8") as f:
             for ev in commander.events:
                 f.write(json.dumps(ev.to_dict(), ensure_ascii=False) + "\n")
@@ -128,7 +135,10 @@ def summarize(results: List[dict], planner: str) -> str:
         rs = [r for r in results if r["scenario"] == name]
         cells = [_cell([r.get(k) for r in rs], fmt) for k, _, fmt in REPORT_KEYS]
         lines.append(f"| {name} | {len(rs)} | " + " | ".join(cells) + " |")
-    lines += ["", "劇本說明：", ""] + [f"- **{s.name}**：{s.description}" for s in SCENARIOS.values() if any(r["scenario"] == s.name for r in results)]
+    lines += ["", "劇本說明：", ""] + [f"- **{s.name}**：{s.description}" for s in SCENARIOS.values()
+                                       if any(r.get("scenario_base", r["scenario"]) == s.name for r in results)]
+    if any(r.get("agents") == "multi" for r in results):
+        lines.append("- **［多 Agent］**：協調 Agent 分派角色，每架各機 Agent 從角色白名單選動作；沒標示的是單一指揮官（對照組）")
     return "\n".join(lines) + "\n"
 
 
@@ -148,6 +158,9 @@ def main(argv=None):
     ap.add_argument("--scenario", nargs="+", default=["all"], help=f"劇本名稱，或 all：{', '.join(SCENARIOS)}")
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
     ap.add_argument("--period", type=float, default=2.0, help="多久問一次 Agent（秒）；LLM 建議 5")
+    ap.add_argument("--agents", nargs="+", choices=("single", "multi"), default=["single"],
+                    help="single = 單一指揮官、multi = 協調 Agent + 各機 Agent；兩個都給就做比較")
+    ap.add_argument("--drone-planner", choices=("rule", "llm"), default="rule", help="多 Agent 時各機 Agent 用規則式或 LLM")
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
 
@@ -160,11 +173,14 @@ def main(argv=None):
     out = Path(args.out) if args.out else ROOT / "output" / "benchmark" / f"{time.strftime('%Y%m%d_%H%M%S')}_{args.planner}"
 
     results = []
-    total = len(names) * len(args.seeds)
+    total = len(names) * len(args.seeds) * len(args.agents)
     for name in names:
-        for seed in args.seeds:
-            print(f"[{len(results) + 1}/{total}] {name} seed={seed} ...", flush=True)
-            results.append(run_once(SCENARIOS[name], seed, args.planner, args.period, cam, err, out / "runs" / f"{name}_s{seed}"))
+        for agents in args.agents:
+            for seed in args.seeds:
+                print(f"[{len(results) + 1}/{total}] {name} {agents} seed={seed} ...", flush=True)
+                results.append(run_once(SCENARIOS[name], seed, args.planner, args.period, cam, err,
+                                        out / "runs" / (f"{name}_s{seed}" if agents == "single" else f"{name}_multi_s{seed}"),
+                                        agents, args.drone_planner))
 
     out.mkdir(parents=True, exist_ok=True)
     rows = [_flat(r) for r in results]

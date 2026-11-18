@@ -37,15 +37,41 @@ MODE_ZH = {"search": "搜尋", "track": "追蹤", "encircle": "包圍", "capture
 STATUS_ZH = {"tracking": "追蹤中", "predicted": "暫時看不到（外推中）", "lost": "遺失"}
 
 
-def make_commander(planner: str, period_s: float, strategy: str = "encircle") -> Commander:
-    """strategy：規則式在沒有操作員指令時的預設策略（LLM 模式時只影響失效時的規則式備援）。"""
-    ids = ["uav1", "uav2", "uav3"]
-    if planner == "rule":
-        return Commander(ids, llm=None, period_s=period_s, strategy=strategy)
-    from llm_agent.llm_client import create_llm_client, load_dotenv
+def make_commander(planner: str, period_s: float, strategy: str = "encircle", agents: str = "single",
+                   drone_planner: str = "rule", drone_period_s: float = 6.0):
+    """建立指揮層。
 
-    load_dotenv(ROOT / ".env")
-    return Commander(ids, llm=create_llm_client(), period_s=period_s, strategy=strategy)  # AGENT_PROVIDER：gemini（預設）/ anthropic
+    agents：single = 單一指揮官（對照組）；multi = 協調 Agent + 每架一個各機 Agent（老師 11/16 的建議）。
+    planner：協調 Agent（或單一指揮官）用 LLM 還是規則式。drone_planner：各機 Agent 用 LLM 還是規則式。
+    strategy：規則式在沒有操作員指令時的預設策略（LLM 模式時只影響失效時的規則式備援）。
+    """
+    ids = ["uav1", "uav2", "uav3"]
+    llm = drone_llms = None
+    if planner == "llm" or (agents == "multi" and drone_planner == "llm"):
+        from llm_agent.llm_client import create_llm_client, load_dotenv
+
+        load_dotenv(ROOT / ".env")  # AGENT_PROVIDER：gemini（預設）/ anthropic
+        llm = create_llm_client() if planner == "llm" else None
+        if agents == "multi" and drone_planner == "llm":
+            drone_llms = {d: create_llm_client() for d in ids}  # 每架各自一個連線，互不阻塞
+    commander = Commander(ids, llm=llm, period_s=period_s, strategy=strategy)
+    if agents == "single":
+        return commander
+    from llm_agent.team import Team
+
+    return Team(commander, drone_llms=drone_llms, drone_period_s=drone_period_s)
+
+
+def drone_event_line(dev) -> str:
+    """各機 Agent 的一筆決策。"""
+    from llm_agent.drone_actions import ACTION_ZH
+
+    t = dev.timestamp_ns / 1e9
+    who = f"{dev.drone_id} {ROLE_ZH.get(dev.role, dev.role)}Agent（{'LLM' if dev.planner == 'llm' else '規則'}）"
+    if not dev.valid:
+        return f"[{t:5.1f}s] {who} 不合法、未送出：{(dev.error or '')[:50]}"
+    lat = f" {dev.latency_ms:.0f}ms" if dev.planner == "llm" else ""
+    return f"[{t:5.1f}s] {who}{lat} → {dev.action}（{ACTION_ZH.get(dev.action, '')}）：{dev.reason}"
 
 
 def action_line(r) -> str:
@@ -121,6 +147,8 @@ def run_headless(engine: DemoEngine, duration_s: float, realtime: bool, scripted
         feed_scripted(engine, scripted)
         for ev in engine.step():
             print(event_line(ev))
+        for dev in engine.new_drone_events:
+            print(drone_event_line(dev))
         for cap in engine.new_captures:
             print(capture_line(cap))
         for rec in engine.ledger.newly_resolved:
@@ -179,6 +207,8 @@ def run_gui(engine: DemoEngine, speed: float, scripted: List[Tuple[float, str]])
             feed_scripted(engine, scripted)
             for ev in engine.step():
                 lines.insert(0, event_line(ev))
+            for dev in engine.new_drone_events:
+                lines.insert(0, drone_event_line(dev))
             for cap in engine.new_captures:
                 lines.insert(0, capture_line(cap))
             for rec in engine.ledger.newly_resolved:
@@ -262,6 +292,10 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="多機包圍 Demo（鳥瞰圖 + Agent 指令面板）")
     ap.add_argument("--planner", choices=("rule", "llm"), default="rule")
     ap.add_argument("--period", type=float, default=2.0, help="多久問一次 Agent（秒）")
+    ap.add_argument("--agents", choices=("multi", "single"), default="multi",
+                    help="multi = 協調 Agent + 每架一個各機 Agent；single = 單一指揮官（對照組）")
+    ap.add_argument("--drone-planner", choices=("rule", "llm"), default="rule", help="各機 Agent 用規則式或 LLM（--agents multi）")
+    ap.add_argument("--drone-period", type=float, default=6.0, help="各機 Agent 多久問一次 LLM（秒）；3 架同時呼叫，免費額度建議 ≥ 6")
     ap.add_argument("--headless", action="store_true", help="不開視窗，跑完輸出指標")
     ap.add_argument("--duration", type=float, default=90.0)
     ap.add_argument("--speed", type=float, default=1.0, help="畫面模式的播放倍速")
@@ -283,7 +317,7 @@ def main(argv=None):
     cam = load_camera_config(ROOT / "config" / "camera.yaml")
     err = load_error_model(ROOT / "config" / "error_model.yaml")
     scripted = parse_scripted(args.cmd)
-    commander = make_commander(args.planner, args.period, args.strategy)
+    commander = make_commander(args.planner, args.period, args.strategy, args.agents, args.drone_planner, args.drone_period)
     link, fleet = None, None
     if args.fleet == "sitl":
         link, fleet = connect_sitl(args.uri, commander, args.max_speed)
@@ -293,7 +327,8 @@ def main(argv=None):
                         evader=evader, drone_max_speed_mps=speed)
     try:
         if args.headless:
-            run_headless(engine, args.duration, realtime=args.planner == "llm" or link is not None, scripted=scripted)
+            llm_used = args.planner == "llm" or (args.agents == "multi" and args.drone_planner == "llm")
+            run_headless(engine, args.duration, realtime=llm_used or link is not None, scripted=scripted)
         else:
             run_gui(engine, 1.0 if link is not None else args.speed, scripted)  # SITL 照真實時間跑，不能快轉
     finally:
@@ -306,6 +341,10 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=True)
     engine.ledger.finish(engine.t_ns / 1e9)
     engine.ledger.write(out)  # actions.jsonl / actions.csv：動作日誌與驗證
+    if engine.multi:
+        with open(out / "drone_events.jsonl", "w", encoding="utf-8") as f:  # 各機 Agent 的每一筆決策
+            for dev in commander.drone_events:
+                f.write(json.dumps(dev.to_dict(), ensure_ascii=False) + "\n")
     summary = engine.summary()
     (out / "metrics.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     with open(out / "events.jsonl", "w", encoding="utf-8") as f:
