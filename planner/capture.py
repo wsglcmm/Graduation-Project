@@ -7,7 +7,7 @@
                  目標往遠離驅趕機的方向逃，也就是往捕捉區跑（shepherding 的 driving position，Strömbom 2014）。
                  如果驅趕機在錯的一側（捕捉區那側），先繞到側面再切到後方，避免把目標往反方向趕。
     capturer     抓拍機：目標離捕捉區還遠時在 P 上空等（伏擊）；目標進入 engage_radius_m 後迎上去，
-                 飛到目標預測位置正上方，讓目標落在相機畫面中央。
+                 飛到目標預測位置正上方，讓目標落在相機畫面中央；目標跑出 disengage_radius_m 才回伏擊點（遲滯）。
     blocker      封鎖機：守在目標往側邊偏離的那一側的側後方（偏離方向有遲滯，避免左右抖動），和驅趕機成 V 字。
 
 所有座標為 world_ned 的 (n, e)，單位 m；高度仍由 FormationPlanner 的高度層決定。
@@ -28,6 +28,7 @@ class CaptureConfig:
     herd_distance_m: float = 12.0
     block_distance_m: float = 14.0
     engage_radius_m: float = 18.0
+    disengage_radius_m: float = 30.0  # 迎上去之後，目標離捕捉區超過這個距離才放棄、回伏擊點（遲滯）
     lead_s: float = 1.0
     side_switch_mps: float = 0.3  # 目標側向速度超過這個值才換封鎖邊
 
@@ -83,9 +84,10 @@ class CaptureGeometry:
         self.zone: Optional[CaptureZone] = None
         self._side = 1.0
         self._target_id: Optional[int] = None
+        self._engaged = False
 
     def reset(self) -> None:
-        self.zone, self._target_id, self._side = None, None, 1.0
+        self.zone, self._target_id, self._side, self._engaged = None, None, 1.0, False
 
     def ensure_zone(self, target: dict, drones: Sequence, heading_rad: float) -> CaptureZone:
         """capture 開始（或換目標）時決定捕捉區；之後沿用。target 為 FusedTarget dict。"""
@@ -93,6 +95,7 @@ class CaptureGeometry:
             p = target["position_world_ned_m"]
             self.zone = propose_zone(p["n"], p["e"], drones, self.cfg, heading_rad)
             self._target_id = target["target_id"]
+            self._engaged = False
         return self.zone
 
     def goal(self, role: str, target: dict, drone) -> Vec:
@@ -102,9 +105,17 @@ class CaptureGeometry:
         tn, te = p["n"] + v["n"] * c.lead_s, p["e"] + v["e"] * c.lead_s
         u = _unit(tn - z.n, te - z.e) or (1.0, 0.0)  # 捕捉區 → 目標
         if role == "capturer":
-            if math.hypot(p["n"] - z.n, p["e"] - z.e) > c.engage_radius_m:
+            # 遲滯：進入 engage_radius_m 才迎上去，超過 disengage_radius_m 才放棄。
+            # 只用一個門檻時，抓拍機一迎上去就把目標嚇回門檻外，於是退回伏擊點、目標又靠近……
+            # 5 m/s 實測會這樣來回 70 秒（seed 9：108 s 才抓到）。
+            dz = math.hypot(p["n"] - z.n, p["e"] - z.e)
+            if dz <= c.engage_radius_m:
+                self._engaged = True
+            elif dz > c.disengage_radius_m:
+                self._engaged = False
+            if not self._engaged:
                 return z.n, z.e  # 伏擊：在捕捉區上空等
-            return tn, te  # 目標快到了：迎上去，飛到目標正上方
+            return tn, te  # 迎上去，飛到目標正上方
         if role == "herder":
             behind = (tn + u[0] * c.herd_distance_m, te + u[1] * c.herd_distance_m)
             rel = _unit(drone.n - tn, drone.e - te)

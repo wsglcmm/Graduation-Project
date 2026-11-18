@@ -118,6 +118,15 @@ def test_capturer_waits_then_engages():
     assert g.goal("capturer", near, DRONES[2]) == pytest.approx((20.0, 0.0))
 
 
+def test_capturer_engage_has_hysteresis():
+    """迎上去之後，目標被嚇退到 18–30 m 之間仍繼續追；超過 30 m 才回伏擊點（避免來回擺盪）。"""
+    g = make_geo(target())  # 捕捉區 (35, 0)
+    assert g.goal("capturer", target(n=20.0), DRONES[2]) == pytest.approx((20.0, 0.0))  # 15 m：迎上去
+    assert g.goal("capturer", target(n=10.0), DRONES[2]) == pytest.approx((10.0, 0.0))  # 25 m：繼續追
+    assert g.goal("capturer", target(n=0.0), DRONES[2]) == pytest.approx((35.0, 0.0))  # 35 m：放棄、回伏擊點
+    assert g.goal("capturer", target(n=10.0), DRONES[2]) == pytest.approx((35.0, 0.0))  # 25 m 但未重新進入 18 m：繼續等
+
+
 def test_blocker_follows_lateral_drift_with_hysteresis():
     g = make_geo(target())
     east = g.goal("blocker", target(ve=1.0), DRONES[1])
