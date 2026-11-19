@@ -67,16 +67,46 @@ class VideoTrack:
 
 
 def load_detection_frames(path) -> List[dict]:
-    """讀偵測檔：§10.3 格式（有 track_id 或佔位 ID），或 B 的原始格式（自動轉換，沒有 track_id 時給佔位 ID）。"""
+    """讀偵測檔：§10.3 格式（有 track_id 或佔位 ID），或 B 的原始格式（自動轉換，沒有 track_id 時給佔位 ID）。
+
+    §10.3 格式會先經過 normalize_frames：補上缺少的 source / video_id、只留規格 §3 的 6 個類別。"""
     from coord_transform.video_detections import convert_frame
 
     rows = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
-    if rows and "frame_id" in rows[0] and "source" in rows[0]:
-        return rows
+    if rows and "frame_id" in rows[0] and "detections" in rows[0]:
+        return normalize_frames(rows, Path(path).parent.name)[0]
     import itertools
 
     ids = itertools.count(PLACEHOLDER_ID_MIN)
     return [convert_frame(r, "video", ids) for r in rows]
+
+
+def normalize_frames(rows: Sequence[dict], video_id: str = "") -> Tuple[List[dict], Dict[str, int]]:
+    """§10.3 影片偵測的容錯整理，回傳（整理後的幀、被丟掉的類別 → 次數）。
+
+    - 缺 source 時補 "video"、缺 video_id 時用資料夾名稱（規格 §10.3 兩者必填；B 11/19 的檔案沒有）。
+    - class 不在規格 §3 的 6 類（car / person / truck / bus / motorcycle / bicycle）就丟掉：
+      YOLO 用 COCO 權重時會輸出 traffic light、umbrella…，C 不處理。
+    """
+    from collections import Counter
+
+    from coord_transform.messages import CLASSES
+
+    dropped: Counter = Counter()
+    out = []
+    for r in rows:
+        dets = []
+        for d in r["detections"]:
+            if d["class"] in CLASSES:
+                dets.append(d)
+            else:
+                dropped[d["class"]] += 1
+        f = dict(r, detections=dets)
+        f.setdefault("source", "video")
+        if not f.get("video_id"):
+            f["video_id"] = video_id
+        out.append(f)
+    return out, dict(dropped)
 
 
 def ground_of(det: dict, H: GroundHomography) -> Tuple[float, float]:
@@ -92,13 +122,19 @@ def has_real_track_ids(frames: Sequence[dict]) -> bool:
 
 def tracks_from_ids(frames: Sequence[dict], H: GroundHomography) -> Dict[int, VideoTrack]:
     """B 已經提供 ByteTrack track_id：直接依 ID 分組。"""
+    from collections import Counter
+
     t0 = frames[0]["timestamp_ns"] if frames else 0
     out: Dict[int, VideoTrack] = {}
+    votes: Dict[int, Counter] = {}
     for f in frames:
         t = (f["timestamp_ns"] - t0) / 1e9
         for d in f["detections"]:
             n, e = ground_of(d, H)
             out.setdefault(d["track_id"], VideoTrack(d["track_id"], d["class"])).samples.append((t, n, e))
+            votes.setdefault(d["track_id"], Counter())[d["class"]] += 1
+    for tid, tr in out.items():
+        tr.cls = votes[tid].most_common(1)[0][0]  # 同一個 ID 偶爾被判成別類（car ↔ truck），用多數決
     return out
 
 
@@ -150,14 +186,21 @@ def _predict(tr: VideoTrack, t: float) -> Tuple[float, float]:
     return s[-1][1] + vn * (t - s[-1][0]), s[-1][2] + ve * (t - s[-1][0])
 
 
-def pick_target(tracks: Dict[int, VideoTrack], classes: Sequence[str] = ("car",), min_path_m: float = 10.0) -> VideoTrack:
+def pick_target(tracks: Dict[int, VideoTrack], classes: Sequence[str] = ("car",), min_path_m: float = 10.0,
+                max_range_m: Optional[float] = 40.0) -> VideoTrack:
     """自動選目標：指定類別、路徑 ≥ min_path_m 的軌跡中，「真的在移動的時間」最長的那一條。
 
     不用「持續最久」：road01 實測，持續最久的車有 3/4 的時間停著等（追一台停住的車看不出攔截）；
-    也不用「路徑最長」：那通常是幾秒內穿過畫面的車，無人機來不及就位。"""
+    也不用「路徑最長」：那通常是幾秒內穿過畫面的車，無人機來不及就位。
+    max_range_m：只考慮 ≥ 90% 的時間都在原點 max_range_m 公尺內的軌跡。地面標定的特徵點都在路口附近，
+    遠處（畫面上方的遠路）靠外插、誤差大，Demo 目標不放在那裡；範圍內一條都沒有時才放寬。"""
     cand = [t for t in tracks.values() if t.cls in classes and t.path_length_m() >= min_path_m]
     if not cand:
         raise ValueError(f"找不到符合條件的軌跡（類別 {classes}、移動 ≥ {min_path_m} m）")
+    if max_range_m is not None:
+        near = [t for t in cand
+                if sum(math.hypot(n, e) <= max_range_m for _, n, e in t.samples) >= 0.9 * len(t.samples)]
+        cand = near or cand
     return max(cand, key=lambda t: (t.moving_time_s(), t.duration_s))
 
 

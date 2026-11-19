@@ -111,3 +111,28 @@ def test_pick_target_prefers_moving_time_over_duration():
 def test_moving_time_ignores_frame_jitter():
     jitter = VideoTrack(1, "car", [(k * 0.02, 0.0, 0.05 * (k % 2)) for k in range(500)])  # 50 fps、原地抖 5 cm
     assert jitter.moving_time_s() == 0.0
+
+
+def test_normalize_frames_fills_source_and_drops_non_spec_classes():
+    from demo.video_scene import normalize_frames
+
+    rows = [{"frame_id": 0, "timestamp_ns": 0, "detections": [det(1, "car", 500, 500), det(2, "traffic light", 10, 10),
+                                                                det(3, "umbrella", 20, 20)]}]
+    frames, dropped = normalize_frames(rows, "road01")
+    assert frames[0]["source"] == "video" and frames[0]["video_id"] == "road01"
+    assert [d["class"] for d in frames[0]["detections"]] == ["car"]
+    assert dropped == {"traffic light": 1, "umbrella": 1}
+
+
+def test_tracks_from_ids_uses_majority_class():
+    fr = [{"frame_id": k, "timestamp_ns": int(k * 1e8), "detections": [det(7, "truck" if k == 1 else "car", 500 + k, 500)]}
+          for k in range(5)]
+    assert tracks_from_ids(fr, H)[7].cls == "car"
+
+
+def test_pick_target_prefers_tracks_near_calibrated_area():
+    far = VideoTrack(1, "car", [(0.0, 60.0, 60.0), (30.0, 60.0, 120.0)])  # 30 s 都在 80 m 外
+    near = VideoTrack(2, "car", [(0.0, 0.0, -10.0), (12.0, 0.0, 14.0)])
+    assert pick_target({1: far, 2: near}).track_id == 2
+    assert pick_target({1: far}).track_id == 1  # 範圍內沒有時放寬
+    assert pick_target({1: far, 2: near}, max_range_m=None).track_id == 1

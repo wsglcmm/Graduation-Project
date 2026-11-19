@@ -372,7 +372,7 @@ def main(argv=None):
     ap.add_argument("--ground", default=None, help="地面標定檔（預設 config/video_ground_<影片資料夾名>.json）")
     ap.add_argument("--ground-scale", type=float, default=None, metavar="m/px",
                     help="沒有標定檔時暫用的比例（只看流程，距離不準，畫面會標示「暫定」）")
-    ap.add_argument("--video-track", type=int, default=None, help="指定影片中當目標的 track_id（預設：真的在移動的時間最長的車）")
+    ap.add_argument("--video-track", type=int, default=None, help="指定影片中當目標的 track_id（預設：路口 40 m 內、真的在移動的時間最長的車）")
     ap.add_argument("--calibrate", action="store_true", help="開地面標定工具（需要 --video 與 --video-file）")
     args = ap.parse_args(argv)
     if args.strategy is None:
