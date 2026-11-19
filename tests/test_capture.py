@@ -197,7 +197,14 @@ def test_zone_replan_only_when_enabled_and_target_turns_away():
     g = CaptureGeometry(CaptureConfig(zone_direction="velocity", arena_radius_m=200.0, replan_zone_s=3.0))
     g.ensure_zone(tgt(0, 0, 5, 0), drones, 0.0, 0.0)
     assert g.ensure_zone(tgt(0, 0, 0, 5), drones, 0.0, 1.0) == z0  # 還沒到 3 s
-    assert g.ensure_zone(tgt(0, 0, 0.5, 0.5), drones, 0.0, 5.0) == z0  # 太慢（停車抖動）不換
     assert g.ensure_zone(tgt(0, 0, 4, 1), drones, 0.0, 5.0) == z0  # 仍大致朝捕捉區前進
     z1 = g.ensure_zone(tgt(0, 0, 0, 5), drones, 0.0, 5.0)  # 轉 90°：重新預測到東方
     assert (round(z1.n), round(z1.e)) == (0, 35) and g.zone_replans == 1
+    z2 = g.ensure_zone(tgt(3, 4, 0.3, 0.2), drones, 0.0, 9.0)  # 停下來（< 1 m/s）、不在捕捉區內：捕捉區放到目標上
+    assert (z2.n, z2.e) == (3, 4) and g.zone_replans == 2
+    assert g.ensure_zone(tgt(3.5, 4, 0.3, 0.2), drones, 0.0, 13.0) == z2  # 停在捕捉區內：不動
+
+    parked = CaptureGeometry(CaptureConfig(zone_direction="velocity", arena_radius_m=200.0, replan_zone_s=3.0))
+    z = parked.ensure_zone(tgt(10, -5, 0, 0), drones, 0.0, 0.0)  # 一開始就停著
+    assert (z.n, z.e) == (10, -5)
+    assert fixed.ensure_zone(tgt(0, 0, 0, 0), drones, 0.0, 20.0) == z0  # 策略場景（replan 關閉）完全不受影響

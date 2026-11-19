@@ -129,14 +129,24 @@ class CaptureGeometry:
             new = True
             self.zone_replans += 1
         if new:
-            self.zone = propose_zone(p["n"], p["e"], drones, self.cfg, heading_rad, (v["n"], v["e"]))
+            if self._parked(p, v, t_s):
+                # 不會反應的目標停著（等紅燈、路邊停車）：沒有前進方向可以預測，捕捉區直接放在目標上，抓拍機過去拍
+                self.zone = CaptureZone(p["n"], p["e"], self.cfg.zone_radius_m)
+            else:
+                self.zone = propose_zone(p["n"], p["e"], drones, self.cfg, heading_rad, (v["n"], v["e"]))
             self._target_id = target["target_id"]
             self._engaged = False
             self._zone_t = t_s
         return self.zone
 
+    def _parked(self, p: dict, v: dict, t_s: Optional[float]) -> bool:
+        return (self.cfg.replan_zone_s is not None and t_s is not None
+                and math.hypot(v["n"], v["e"]) < self.cfg.replan_min_speed_mps)
+
     def _should_replan(self, p: dict, v: dict, t_s: Optional[float]) -> bool:
-        """目標在跑、離捕捉區還遠、而且不是朝捕捉區前進（夾角 > 60°）→ 重新預測。只在 replan_zone_s 有設時。"""
+        """只在 replan_zone_s 有設時（不會反應的目標）：
+        - 目標停著（< replan_min_speed_mps）且不在捕捉區內 → 重新放（放在目標上）
+        - 目標在跑、離捕捉區還遠、而且不是朝捕捉區前進（夾角 > 60°）→ 重新預測到它前進的方向"""
         c, z = self.cfg, self.zone
         if c.replan_zone_s is None or t_s is None:
             return False
@@ -144,7 +154,9 @@ class CaptureGeometry:
             return False
         speed = math.hypot(v["n"], v["e"])
         dz = math.hypot(z.n - p["n"], z.e - p["e"])
-        if speed < c.replan_min_speed_mps or dz <= c.engage_radius_m:
+        if speed < c.replan_min_speed_mps:
+            return dz > c.zone_radius_m  # 停著、但不在捕捉區內（例如捕捉區還在先前預測的前方）→ 改放到目標上
+        if dz <= c.engage_radius_m:
             return False
         cos = ((z.n - p["n"]) * v["n"] + (z.e - p["e"]) * v["e"]) / (speed * dz)
         return cos < 0.5
