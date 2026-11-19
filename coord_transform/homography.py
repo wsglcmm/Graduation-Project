@@ -120,13 +120,21 @@ class GroundHomography:
 
 
 def load_video_ground(path) -> GroundHomography:
-    """讀 config/video_ground*.json。兩種寫法擇一：
+    """讀 config/video_ground*.json。三種寫法擇一（依序檢查）：
 
-    1. 標定點：{"video_id": ..., "points": [{"pixel": [u, v], "ground_ne_m": [n, e]}, ...]}（≥ 4 點）
-    2. 比例：{"video_id": ..., "meters_per_pixel": 0.05, "origin_pixel": [u, v]}（正射、北朝上）
+    1. 矩陣：{"video_id": ..., "H": 3×3, "rms_error_m": ...}，H 把像素 (u, v) 換成地面 (n, e)（m）。
+       給「點 + 線對應」一起擬合這類 DLT 做不到的標定方法用，原始觀測另外存在同一個檔案裡備查。
+    2. 標定點：{"video_id": ..., "points": [{"pixel": [u, v], "ground_ne_m": [n, e]}, ...]}（≥ 4 點）
+    3. 比例：{"video_id": ..., "meters_per_pixel": 0.05, "origin_pixel": [u, v]}（正射、北朝上）
     """
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     vid = str(raw.get("video_id", ""))
+    if "H" in raw:
+        H = np.asarray(raw["H"], dtype=np.float64)
+        if H.shape != (3, 3) or abs(H[2, 2]) < 1e-12:
+            raise ValueError("H 必須是 3×3 矩陣，且 H[2][2] ≠ 0")
+        rms = raw.get("rms_error_m")
+        return GroundHomography(H / H[2, 2], vid, None if rms is None else float(rms))
     if "points" in raw:
         pts = raw["points"]
         return GroundHomography.fit([p["pixel"] for p in pts], [p["ground_ne_m"] for p in pts], vid)

@@ -95,3 +95,16 @@ def test_load_video_ground_points_and_scale(tmp_path):
     f.write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError):
         load_video_ground(f)
+
+
+def test_load_video_ground_matrix_round_trip(tmp_path):
+    g = GroundHomography.fit([(0, 0), (100, 0), (100, 100), (0, 100), (50, 30)],
+                             [(10, 0), (10, 10), (0, 10), (0, 0), (7, 5)], "v")
+    f = tmp_path / "g.json"
+    f.write_text(json.dumps(g.to_dict()), encoding="utf-8")
+    h = load_video_ground(f)
+    assert h.video_id == "v" and h.rms_error_m == pytest.approx(g.rms_error_m)
+    assert h.pixel_to_ground(37, 61) == pytest.approx(g.pixel_to_ground(37, 61))
+    f.write_text(json.dumps({"H": [[1, 0], [0, 1]]}), encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_video_ground(f)
