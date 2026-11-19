@@ -56,3 +56,13 @@ def test_benchmark_drone_speed_and_period_flags(tmp_path):
     assert res[0]["drone_speed_mps"] == 5.0 and res[0]["drone_planner"] == "rule"
     assert res[0]["time_to_capture_by_capturer_s"] is not None
     assert "速度上限 5 m/s" in (tmp_path / "summary.md").read_text(encoding="utf-8")
+
+
+def test_switch_capture_measures_time_after_command(tmp_path):
+    from demo import benchmark
+
+    res = benchmark.main(["--scenario", "switch_capture", "--seeds", "0", "--agents", "multi", "--drone-speed", "5",
+                          "--out", str(tmp_path)])
+    m = res[0]
+    assert m["operator_commands_answered"] == "1/1"
+    assert m["capture_after_command_s"] == m["time_to_capture_by_capturer_s"] - 35.0 > 0

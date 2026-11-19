@@ -35,6 +35,7 @@ LOCKING = ("hold", "return_home")
 REPORT_KEYS = (  # summary.md 的欄位順序（key, 標題, 格式）
     ("time_to_capture_by_capturer_s", "抓拍機抓拍 (s)", "{:.1f}"),
     ("zone_entered_at_s", "趕進捕捉區 (s)", "{:.1f}"),
+    ("capture_after_command_s", "下令後抓拍 (s)", "{:.1f}"),
     ("time_to_encircle_s", "包圍完成 (s)", "{:.1f}"),
     ("encircled_fraction", "包圍時間比例", "{:.0%}"),
     ("visible_fraction", "視野內比例", "{:.0%}"),
@@ -102,6 +103,9 @@ def run_once(scn: Scenario, seed: int, planner: str, period_s: float, cam, err, 
     if scn.reencircle_from_s is not None:
         later = [t for t in m["encircle_onsets_s"] if t >= scn.reencircle_from_s]
         m["reencircle_s"] = later[0] - scn.reencircle_from_s if later else None
+    if scn.capture_from_s is not None:
+        t = m.get("time_to_capture_by_capturer_s")
+        m["capture_after_command_s"] = t - scn.capture_from_s if t is not None and t >= scn.capture_from_s else None
     label = scn.name if agents == "single" else f"{scn.name}［多 Agent］"
     m.update({"scenario": label, "scenario_base": scn.name, "seed": seed, "planner": planner, "agents": agents,
               "drone_planner": drone_planner if agents == "multi" else None,
