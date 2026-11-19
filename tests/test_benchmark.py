@@ -46,3 +46,13 @@ def test_benchmark_compares_single_and_multi_agent(tmp_path):
     assert results[0]["time_to_capture_by_capturer_s"] is not None and results[1]["time_to_capture_by_capturer_s"] is not None
     assert (tmp_path / "runs" / "evader_capture_multi_s0" / "metrics.json").exists()
     assert "［多 Agent］" in (tmp_path / "summary.md").read_text(encoding="utf-8")
+
+
+def test_benchmark_drone_speed_and_period_flags(tmp_path):
+    from demo import benchmark
+
+    res = benchmark.main(["--scenario", "evader_capture", "--seeds", "0", "--agents", "multi", "--drone-speed", "5",
+                          "--drone-period", "8", "--out", str(tmp_path)])
+    assert res[0]["drone_speed_mps"] == 5.0 and res[0]["drone_planner"] == "rule"
+    assert res[0]["time_to_capture_by_capturer_s"] is not None
+    assert "速度上限 5 m/s" in (tmp_path / "summary.md").read_text(encoding="utf-8")
