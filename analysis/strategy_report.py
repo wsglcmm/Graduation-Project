@@ -93,7 +93,8 @@ def strategy_table(rows: List[dict]) -> str:
 
 
 def speed_table(rows_by_speed: Dict[float, List[dict]]) -> str:
-    lines = ["| 速度上限 (m/s) | 策略 | 抓拍成功 | 抓拍時間 (s) | 趕進捕捉區 | 最小水平距離 (m) |", "|---|---|---|---|---|---|"]
+    lines = ["| 速度上限 (m/s) | 策略 | 抓拍成功 | 抓拍時間 (s) | 趕進捕捉區 | 最小水平距離 (m) | 最小 3D 距離 (m) |",
+             "|---|---|---|---|---|---|---|"]
     for spd in sorted(rows_by_speed):
         g = group([r for r in rows_by_speed[spd] if r["agents"] == "multi"], "scenario_base")
         for scn in ("evader_capture", "evader_encircle"):
@@ -103,11 +104,32 @@ def speed_table(rows_by_speed: Dict[float, List[dict]]) -> str:
             t = [x for x in (num(r[capture_key(scn)]) for r in rs) if x is not None]
             zone = [num(r["zone_entered_at_s"]) for r in rs]
             hmin = [x for x in (num(r["min_drone_horizontal_m"]) for r in rs) if x is not None]
+            dmin = [x for x in (num(r["min_drone_distance_m"]) for r in rs) if x is not None]
             lines.append(f"| {spd:g} | {STRATEGY_ZH[scn]} | {pct(len(t), len(rs))}{'＊' if scn == 'evader_encircle' else ''} | "
                          f"{mean_sd(t)} | {'—' if scn == 'evader_encircle' else pct(sum(z is not None for z in zone), len(rs))} | "
-                         f"{min(hmin):.1f} |")
+                         f"{min(hmin):.1f} | {min(dmin):.1f} |")
     lines.append("")
-    lines.append("多 Agent（協調 Agent + 各機 Agent，規則式）。目標逃跑速度上限 2.2 m/s。")
+    lines.append("多 Agent（協調 Agent + 各機 Agent，規則式）。目標逃跑速度上限 2.2 m/s。三架分在 25 / 30 / 35 m 高度層，"
+                 "所以水平距離可以小於 5 m；安全要求看 3D 距離（規格：≥ 5 m）。")
+    return "\n".join(lines)
+
+
+def switch_table(rows: List[dict]) -> str:
+    lines = ["| 指揮架構 | 次數 | 下令後完成抓拍 | 下令後抓拍時間 (s) | 中位數 (s) | 指令回應 (s) | 最小 3D 距離 (m) |",
+             "|---|---|---|---|---|---|---|"]
+    for ag in ("single", "multi"):
+        rs = [r for r in rows if r["scenario_base"] == "switch_capture" and r["agents"] == ag]
+        if not rs:
+            continue
+        t = [x for x in (num(r.get("capture_after_command_s")) for r in rs) if x is not None]
+        resp = [x for x in (num(r.get("operator_response_s")) for r in rs) if x is not None]
+        dmin = [x for x in (num(r["min_drone_distance_m"]) for r in rs) if x is not None]
+        lines.append(f"| {AGENTS_ZH[ag]} | {len(rs)} | {pct(len(t), len(rs))} | {mean_sd(t)} | "
+                     f"{statistics.median(t):.1f} | {mean_sd(resp, '{:.2f}')} | {min(dmin):.1f} |" if t else
+                     f"| {AGENTS_ZH[ag]} | {len(rs)} | {pct(0, len(rs))} | — | — | {mean_sd(resp, '{:.2f}')} | {min(dmin):.1f} |")
+    lines.append("")
+    lines.append("劇本 switch_capture：先包圍，第 35 秒操作員改口「改成把那台車趕進捕捉區抓拍」，150 s 內未抓拍算失敗。"
+                 "量的是「下令 → 協調 Agent 重新分派驅趕 / 抓拍 / 封鎖 → 抓拍機完成抓拍」的時間。")
     return "\n".join(lines)
 
 
@@ -143,7 +165,9 @@ def _style(ax, plt):
     ax.set_axisbelow(True)
 
 
-def figures(rows: List[dict], out: Path) -> List[str]:
+def figures(strat: List[dict], out: Path, switch: Optional[List[dict]] = None,
+            other_speed: Optional[List[dict]] = None) -> List[str]:
+    """圖 1：抓拍成功率（單一指揮官 vs 多 Agent）；圖 2：抓拍所需時間分佈（多 Agent，每點一個 seed）。"""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -151,59 +175,73 @@ def figures(rows: List[dict], out: Path) -> List[str]:
 
     plt.rcParams["font.sans-serif"] = ["Microsoft JhengHei", "Noto Sans CJK TC", "PingFang TC", "DejaVu Sans"]
     plt.rcParams["axes.unicode_minus"] = False
-    g = group(rows, "scenario_base", "agents")
-    scns = [s for s in STRATEGY_ZH if any((s, a) in g for a in ("single", "multi"))]
     files = []
 
-    # 圖 1：抓拍成功率（水平長條，兩個系列）
-    fig, ax = plt.subplots(figsize=(7.2, 0.9 + 0.75 * len(scns)), dpi=200)
+    # 圖 1：抓拍成功率（水平長條，兩個系列）。command_capture 與 evader_capture 相同，不重複畫
+    rate_rows = []  # (標籤, {agents: (成功數, 次數)})
+    g = group(strat, "scenario_base", "agents")
+    for scn, label in (("evader_capture", "驅趕抓拍"), ("evader_encircle", "包圍（對照）＊")):
+        rate_rows.append((label, {ag: (sum(num(r[capture_key(scn)]) is not None for r in g.get((scn, ag), [])),
+                                       len(g.get((scn, ag), []))) for ag in ("single", "multi")}))
+    if switch:
+        gs = group(switch, "agents")
+        rate_rows.insert(1, ("先包圍、35 s 改口抓拍", {ag: (sum(num(r.get("capture_after_command_s")) is not None
+                                                              for r in gs.get((ag,), [])), len(gs.get((ag,), [])))
+                                                  for ag in ("single", "multi")}))
+    fig, ax = plt.subplots(figsize=(7.2, 1.2 + 0.75 * len(rate_rows)), dpi=200)
     fig.patch.set_facecolor(SURFACE)
     h = 0.34
-    for i, s in enumerate(reversed(scns)):
+    for i, (label, d) in enumerate(reversed(rate_rows)):
         for j, ag in enumerate(("single", "multi")):
-            rs = g.get((s, ag), [])
-            if not rs:
+            k, n = d[ag]
+            if not n:
                 continue
-            k = sum(num(r[capture_key(s)]) is not None for r in rs)
             y = i + (h / 2 + 0.02 if j == 0 else -h / 2 - 0.02)
-            ax.barh(y, k / len(rs) * 100, height=h, color=SERIES[ag], label=AGENTS_ZH[ag] if i == 0 else None)
-            ax.text(k / len(rs) * 100 + 1.5, y, f"{k}/{len(rs)}", va="center", fontsize=8, color=TEXT2)
-    ax.set_yticks(range(len(scns)))
-    ax.set_yticklabels([STRATEGY_ZH[s] for s in reversed(scns)], color=TEXT, fontsize=9)
+            ax.barh(y, k / n * 100, height=h, color=SERIES[ag], label=AGENTS_ZH[ag] if i == 0 else None)
+            ax.text(k / n * 100 + 1.5, y, f"{k}/{n}", va="center", fontsize=8, color=TEXT2)
+    ax.set_yticks(range(len(rate_rows)))
+    ax.set_yticklabels([r[0] for r in reversed(rate_rows)], color=TEXT, fontsize=9)
     ax.set_xlim(0, 112)
     ax.set_xticks([0, 25, 50, 75, 100])
     ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"], fontsize=8)
     _style(ax, plt)
-    ax.set_title("抓拍成功率（120 s 內）", loc="left", color=TEXT, fontsize=11, pad=24)
-    ax.text(0, 1.03, "包圍策略沒有抓拍機，以任一架完成抓拍計", transform=ax.transAxes, fontsize=8, color=TEXT2)
+    ax.set_title("抓拍成功率（速度上限 5 m/s，每組 20 個 seed）", loc="left", color=TEXT, fontsize=11, pad=30)
+    ax.text(0, 1.03, "＊包圍沒有抓拍機，以任一架完成抓拍計", transform=ax.transAxes, fontsize=8, color=TEXT2)
     ax.legend(frameon=False, fontsize=8, loc="lower right", bbox_to_anchor=(1, 1.0), ncol=2)
     fig.tight_layout()
     fig.savefig(out / "fig_capture_rate.png", facecolor=SURFACE)
     plt.close(fig)
     files.append("fig_capture_rate.png")
 
-    # 圖 2：抓拍時間分佈（每個點一個 seed；只有驅趕抓拍）
-    cap = [s for s in scns if s != "evader_encircle"]
-    fig, ax = plt.subplots(figsize=(7.2, 0.9 + 0.75 * len(cap)), dpi=200)
+    # 圖 2：抓拍所需時間（多 Agent），單一系列 → 不需要圖例
+    dist = []
+    for label, rows, key in (("3 m/s：從頭驅趕抓拍", [r for r in (other_speed or []) if r["scenario_base"] == "evader_capture"
+                                                    and r["agents"] == "multi" and num(r.get("drone_speed_mps")) == 3.0],
+                              "time_to_capture_by_capturer_s"),
+                             ("5 m/s：從頭驅趕抓拍", [r for r in strat if r["scenario_base"] == "evader_capture" and r["agents"] == "multi"],
+                              "time_to_capture_by_capturer_s"),
+                             ("5 m/s：中途改口（從下令起算）", [r for r in (switch or []) if r["agents"] == "multi"],
+                              "capture_after_command_s")):
+        t = [x for x in (num(r.get(key)) for r in rows) if x is not None]
+        if t:
+            dist.append((label, t, len(rows)))
+    fig, ax = plt.subplots(figsize=(7.2, 1.2 + 0.7 * len(dist)), dpi=200)
     fig.patch.set_facecolor(SURFACE)
-    for i, s in enumerate(reversed(cap)):
-        for j, ag in enumerate(("single", "multi")):
-            t = [x for x in (num(r[capture_key(s)]) for r in g.get((s, ag), [])) if x is not None]
-            if not t:
-                continue
-            y0 = i + (0.17 if j == 0 else -0.17)
-            jit = [((k * 37) % 11 - 5) / 5 * 0.07 for k in range(len(t))]  # 固定的小抖動，避免重疊
-            ax.scatter(t, [y0 + d for d in jit], s=14, color=SERIES[ag], edgecolors=SURFACE, linewidths=0.6,
-                       label=AGENTS_ZH[ag] if i == 0 else None, zorder=3)
-            med = statistics.median(t)
-            ax.plot([med, med], [y0 - 0.13, y0 + 0.13], color=TEXT, linewidth=1.6, zorder=4)
-    ax.set_yticks(range(len(cap)))
-    ax.set_yticklabels([STRATEGY_ZH[s] for s in reversed(cap)], color=TEXT, fontsize=9)
-    ax.set_xlabel("抓拍機完成抓拍的時間 (s)", color=TEXT2, fontsize=8)
+    for i, (label, t, n) in enumerate(reversed(dist)):
+        jit = [((k * 37) % 11 - 5) / 5 * 0.12 for k in range(len(t))]  # 固定的小抖動，避免重疊
+        ax.scatter(t, [i + d for d in jit], s=16, color=SERIES["multi"], edgecolors=SURFACE, linewidths=0.6, zorder=3)
+        med = statistics.median(t)
+        ax.plot([med, med], [i - 0.22, i + 0.22], color=TEXT, linewidth=1.8, zorder=4)
+        ax.text(med, i + 0.3, f"中位數 {med:.1f} s" + (f"（{n - len(t)} 次未抓到）" if len(t) < n else ""),
+                ha="center", va="bottom", fontsize=8, color=TEXT2)
+    ax.set_yticks(range(len(dist)))
+    ax.set_yticklabels([d[0] for d in reversed(dist)], color=TEXT, fontsize=9)
+    ax.set_ylim(-0.6, len(dist) - 0.2)
+    ax.set_xlim(0, None)
+    ax.set_xlabel("抓拍機完成抓拍所需時間 (s)", color=TEXT2, fontsize=8)
     ax.tick_params(axis="x", labelsize=8)
     _style(ax, plt)
-    ax.set_title("抓拍所需時間（每點 = 一個 seed，黑線 = 中位數）", loc="left", color=TEXT, fontsize=11, pad=12)
-    ax.legend(frameon=False, fontsize=8, loc="lower right", bbox_to_anchor=(1, 1.0), ncol=2)
+    ax.set_title("抓拍所需時間（多 Agent，每點 = 一個 seed）", loc="left", color=TEXT, fontsize=11, pad=10)
     fig.tight_layout()
     fig.savefig(out / "fig_capture_time.png", facecolor=SURFACE)
     plt.close(fig)
@@ -216,6 +254,7 @@ def main(argv=None):
     ap.add_argument("--strategy", required=True, help="策略比較的 runs.csv（evader_capture / evader_encircle / command_capture）")
     ap.add_argument("--speed", nargs="*", default=[], help="其他速度上限的 runs.csv（速度敏感度）")
     ap.add_argument("--operator", default=None, help="操作員指令劇本的 runs.csv（rabbit）")
+    ap.add_argument("--switch", default=None, help="中途換策略劇本 switch_capture 的 runs.csv")
     ap.add_argument("--out", default="analysis/results")
     ap.add_argument("--commit", default="", help="寫進報告的程式版本（git commit）")
     args = ap.parse_args(argv)
@@ -236,18 +275,30 @@ def main(argv=None):
         "目標是會逃的模擬目標（離最近無人機越近逃得越快，上限 2.2 m/s，半徑 60 m 圓形場地）。這是我們設計的簡化模型，不代表真實車輛或行人。", "",
         "## 表 1：捕捉策略比較", "", strategy_table(strat), "",
     ]
+    if args.switch:
+        md += ["## 表 1b：中途換策略（自然語言改口 → 重新分派角色）", "", switch_table(load(args.switch)), ""]
     if len(by_speed) > 1:
         md += ["## 表 2：速度上限敏感度", "", speed_table(by_speed), ""]
     if args.operator:
         md += ["## 表 3：操作員指令劇本（指令理解與安全行為）", "", operator_table(load(args.operator)), ""]
-    figs = figures(strat, out)
+    other = [r for p in args.speed for r in load(p)]
+    figs = figures(strat, out, load(args.switch) if args.switch else None, other)
     md += ["## 圖", ""] + [f"![{f}]({f})" for f in figs] + ["",
            "## 名詞", "",
            "- **抓拍成功**：抓拍機畫面中，目標中心落在中央 20% × 20%、像素尺寸 ≥ 40 px，連續 2 s（規格 §10.10），用目標真值判定。",
            "- **趕進捕捉區**：目標進入捕捉區（半徑 10 m）的比例；捕捉區由規劃器決定，同一次捕捉期間固定。",
            "- **指令一致率**：無人機速度方向與「指向目標點」夾角 < 45°（或已到達）的時間比例，衡量飛控是否照指令飛。",
            "- **動作到達率**：動作日誌中在期限內到達目標點的比例（規格 §10.11）；目標點跟著逃跑目標移動，所以低於指令一致率。",
-           "- **單一指揮官 / 多 Agent**：單一指揮官直接分派三架的角色；多 Agent 是協調 Agent 分派角色、每架各機 Agent 從角色白名單選動作。",
+           "- **單一指揮官 / 多 Agent**：單一指揮官直接分派三架的角色；多 Agent 是協調 Agent 分派角色、每架各機 Agent 從角色白名單選動作。"
+           "規則式的各機 Agent 選出的動作與單一指揮官的隱含動作幾乎相同，所以兩者數字很接近（包圍與兔子劇本完全相同）；"
+           "差異要在 LLM 版本才看得出來（見 LLM 實測）。",
+           "- **重現**：`python -m demo.benchmark --scenario evader_capture evader_encircle command_capture --agents single multi "
+           "--seeds 0 … 19 --drone-speed 5`；`--scenario evader_capture evader_encircle --agents multi --seeds 0 … 19 --drone-speed 3`；"
+           "`--scenario switch_capture --agents single multi --seeds 0 … 19 --drone-speed 5`；"
+           "`--scenario autonomous command_encircle hold_resume return_home --agents single multi --seeds 0 … 9`；"
+           "再用 `python -m analysis.strategy_report --strategy … --speed … --switch … --operator …` 產生本檔。",
+           "- **command_capture 與 evader_capture 結果相同**：指令在第 10 秒、目標約第 18 秒才被發現，協調 Agent 記住操作員意圖，"
+           "發現目標時直接進入驅趕抓拍，之後的過程與預設就是驅趕抓拍相同。中途換策略的能力看表 1b。",
            ""]
     (out / "strategy_benchmark.md").write_text("\n".join(md), encoding="utf-8")
     print("\n".join(md))
