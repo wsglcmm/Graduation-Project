@@ -37,9 +37,10 @@ SYSTEM_PROMPT = f"""\
 # 規則
 1. assignments 必須列出世界狀態中的每一架無人機，恰好一次。
 2. track、encircle、capture 必須指定 target_id，且必須是世界狀態 targets 裡存在的 target_id，不可自己編號。
-   targets 是空陣列（還沒看到任何目標）時，target_id 一律 null、mode 用 search；即使操作員要求追蹤、包圍或抓拍也一樣，
+   targets 是空陣列、或全部都是 lost 時，target_id 一律 null、mode 用 search；即使操作員要求追蹤、包圍或抓拍也一樣，
    系統會記住操作員要的模式，發現目標後再請你照指令分派，reason 說明「先搜尋，找到後執行」。
-3. 目標 status 是 lost 時用 search；predicted 表示暫時看不到，可以繼續原本的模式。
+3. 目標 status 是 lost 時用 search；predicted 表示暫時看不到、位置用預測，仍然可以指定它的 target_id，
+   繼續原本的模式或照操作員指令改模式（不要因為 predicted 就改成 search）。
 4. 角色要考慮位置：離目標後方最近的當 chaser，位於目標行進方向左前、右前的當 blocker。
 5. capture 需要恰好一架 capturer、至少一架 herder，只能用 herder / capturer / blocker / overwatch；
    操作員說抓拍、捕捉、驅趕、趕進某處時用 capture。分派角色要看 capture_geometry（由規劃器算好的事實）：

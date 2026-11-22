@@ -426,3 +426,23 @@ def test_no_capture_geometry_without_target_or_config():
     _run(c, 0, [])
     assert "capture_geometry" not in llm.calls[0][-1]["content"]
     c.close()
+
+
+def test_operator_capture_answered_with_search_keeps_capture_intent_even_if_target_predicted():
+    """11/22 實測：目標 predicted 時 LLM 回 search，指令不能因此被鎖成「只能搜尋」。"""
+    llm = ScriptedClient([json.dumps(SEARCH)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    c.command("改成把那台車趕進捕捉區抓拍")
+    _run(c, 0, [target(status="predicted")])
+    assert c.current.mode == "search" and c.directive == "capture"
+    assert "capture" in c.standing_order()
+    c.close()
+
+
+def test_operator_search_command_locks_search():
+    llm = ScriptedClient([json.dumps(SEARCH)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    c.command("先到處找找看")
+    _run(c, 0, [target()])
+    assert c.directive == "search"
+    c.close()

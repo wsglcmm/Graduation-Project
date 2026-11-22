@@ -168,15 +168,18 @@ class Commander:
         self.current, self.current_id = plan, next(self._ids)
         if ev_kw.get("trigger") == "operator":
             self.directive, self.directive_text = plan.mode, ev_kw.get("operator_command")
-            if plan.mode == "search" and not has_target:
+            if plan.mode == "search":
                 # 例如「包圍那台車」但目前看不到車 → 只能先搜尋；這不是操作員要「只搜尋」。
                 # 記住操作員真正要的模式（包圍 / 追蹤 / 捕捉，都允許先 search），發現目標後照指令執行；
                 # 看不出要什麼就不鎖定。之前直接不鎖定，結果發現目標後回到預設策略，指令被忘記（實測發現）。
+                # 不再看 has_target：11/22 LLM 實測，目標是 predicted（短暫沒看到）時 LLM 也選了 search，
+                # 結果指令被鎖成「只能 search」，整次都沒有抓拍。操作員本來就要搜尋時才鎖定 search。
                 intent = _parse_operator(self.directive_text)
                 if intent in ("track", "encircle", "capture"):
                     self.directive = intent
-                else:
+                elif not (has_target or intent == "search"):
                     self.directive = self.directive_text = None
+                # 其他情況（看得到目標、指令也不是追 / 包圍 / 捕捉）：LLM 判斷操作員就是要搜尋，維持 search
         ev = AgentEvent(plan_id=self.current_id, valid=True, plan=plan.model_dump(), **ev_kw)
         self.events.append(ev)
         return ev
