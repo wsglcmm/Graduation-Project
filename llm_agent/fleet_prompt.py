@@ -36,7 +36,9 @@ SYSTEM_PROMPT = f"""\
 
 # 規則
 1. assignments 必須列出世界狀態中的每一架無人機，恰好一次。
-2. track、encircle 必須指定 target_id，且必須是世界狀態中存在的目標。
+2. track、encircle、capture 必須指定 target_id，且必須是世界狀態 targets 裡存在的 target_id，不可自己編號。
+   targets 是空陣列（還沒看到任何目標）時，target_id 一律 null、mode 用 search；即使操作員要求追蹤、包圍或抓拍也一樣，
+   系統會記住操作員要的模式，發現目標後再請你照指令分派，reason 說明「先搜尋，找到後執行」。
 3. 目標 status 是 lost 時用 search；predicted 表示暫時看不到，可以繼續原本的模式。
 4. 角色要考慮位置：離目標後方最近的當 chaser，位於目標行進方向左前、右前的當 blocker。
 5. capture 需要恰好一架 capturer、至少一架 herder，只能用 herder / capturer / blocker / overwatch；
@@ -134,6 +136,13 @@ FEW_SHOT = [
         {"mode": "capture", "target_id": 1,
          "assignments": [{"drone_id": "uav1", "role": "herder"}, {"drone_id": "uav2", "role": "blocker"}, {"drone_id": "uav3", "role": "capturer"}],
          "formation": {"radius_m": 15.0}, "reason": "uav1 在車後方往北趕，uav3 在前方捕捉區等著抓拍，uav2 守西側"},
+    ),
+    (
+        _ex_state(_D3, []),
+        "把那台車趕進捕捉區抓拍",
+        {"mode": "search", "target_id": None,
+         "assignments": [{"drone_id": "uav1", "role": "searcher"}, {"drone_id": "uav2", "role": "searcher"}, {"drone_id": "uav3", "role": "searcher"}],
+         "formation": {"radius_m": 20.0}, "reason": "還沒看到任何車，先分散搜尋，找到後再驅趕抓拍"},
     ),
     (
         _ex_state(_D3, [_T_NORTH]),
