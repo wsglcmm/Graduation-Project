@@ -19,6 +19,7 @@
       違反的計畫視為不合法，沿用上一個計畫。
     - 操作員指令的請求失敗（例外或不合法）會自動重送，最多 MAX_OPERATOR_RETRIES 次；
       仍失敗就改用規則式解讀，保證操作員的指令一定有回應。
+    - 定期 / 目標事件的請求連續失敗 LLM_FAIL_FALLBACK 次（例如額度用完一直 429）：由規則式照有效指令接手，LLM 恢復後交回。
     - 背景請求進行中操作員下了新指令：舊請求的結果標記「已被取代」，不套用。
 """
 import itertools
@@ -33,6 +34,7 @@ from .fleet_schema import Plan, parse_plan
 from .rule_planner import _parse_operator, rule_plan
 
 MAX_OPERATOR_RETRIES = 2
+LLM_FAIL_FALLBACK = 3  # LLM 連續失敗這麼多次，就由規則式接手（照操作員有效指令）
 LOCKING_MODES = ("hold", "return_home")  # 操作員下這些指令後，Agent 暫停到下一個操作員指令
 ALLOWED_UNDER = {"search": ("search",), "track": ("track", "encircle", "search"), "encircle": ("track", "encircle", "search"),
                  "capture": ("capture", "search")}
@@ -75,6 +77,7 @@ class Commander:
         self._last_ask_ns: Optional[int] = None
         self._last_status: dict = {}
         self._role_lock: Optional[Tuple[Optional[int], Dict[str, str]]] = None  # (target_id, 各機角色)
+        self._llm_fail_streak = 0  # LLM 連續失敗次數（API 失敗或不合法）
         self._ids = (f"p{i:04d}" for i in itertools.count(1))
         self._pending_cmd: Optional[str] = None
         self._lock = threading.Lock()  # command() 可能來自終端機輸入執行緒
@@ -271,7 +274,9 @@ class Commander:
         except Exception as e:  # 網路、金鑰、逾時都在這裡
             out.append(self._reject(f"{type(e).__name__}: {e}"[:200], kw))
         if out[-1].valid:
+            self._llm_fail_streak = 0
             return out
+        self._llm_fail_streak += 1
         if trig == "operator":
             if self._requeue(cmd):
                 out[-1].error += f"（自動重送 {self._op_retries}/{MAX_OPERATOR_RETRIES}）"
@@ -279,6 +284,11 @@ class Commander:
                 out.append(self._rule(t_ns, drones, targets, trig, cmd, note="LLM 重試仍失敗，改用規則式解讀操作員指令"))
         elif self.current is None:
             out.append(self._rule(t_ns, drones, targets, trig, cmd, note="LLM 失敗，改用規則式"))
+        elif self._llm_fail_streak >= LLM_FAIL_FALLBACK:
+            # 11/22 實測：免費額度用完（429）後 LLM 一直失敗，只能沿用最後一個計畫（剛好是 search），
+            # 操作員要的抓拍整次都沒有執行。連續失敗就由規則式照操作員有效指令接手，LLM 恢復後再交回。
+            out.append(self._rule(t_ns, drones, targets, trig, cmd, rule_cmd=self.directive_text,
+                                  note=f"LLM 連續 {self._llm_fail_streak} 次失敗，這一輪改用規則式（照操作員有效指令）"))
         return out
 
     def _rule(self, t_ns, drones, targets, trig, cmd, note: Optional[str] = None, rule_cmd: Optional[str] = None) -> AgentEvent:

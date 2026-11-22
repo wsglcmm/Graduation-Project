@@ -484,3 +484,21 @@ def test_role_lock_resets_when_target_changes():
     ev = _run(c, 2 * S, [target(), target(tid=2, n=50)])
     assert ev[-1].note is None and {a.drone_id: a.role for a in c.current.assignments}["uav1"] == "blocker"
     c.close()
+
+
+def test_rule_takes_over_after_consecutive_llm_failures_and_follows_directive():
+    """11/22 實測：額度用完後 LLM 一直 429，計畫停在 search，操作員的抓拍沒執行。連續失敗 3 次改用規則式接手。"""
+    boom = RuntimeError("429 RESOURCE_EXHAUSTED")
+    llm = ScriptedClient([json.dumps(SEARCH), boom, boom, boom, json.dumps(CAP)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    c.command("改成把那台車趕進捕捉區抓拍")
+    _run(c, 0, [target(status="lost")])  # 看不到車 → search，但記住要抓拍
+    assert c.current.mode == "search" and c.directive == "capture"
+    ev = _run(c, 2 * S)
+    ev += _run(c, 4 * S)
+    assert c.current.mode == "search" and all(not e.valid for e in ev)  # 失敗 2 次：沿用上一個計畫
+    ev = _run(c, 6 * S)  # 第 3 次失敗 → 規則式照有效指令接手
+    assert ev[-1].planner == "rule" and "連續 3 次失敗" in ev[-1].error and c.current.mode == "capture"
+    ev = _run(c, 8 * S)  # LLM 恢復：交回 LLM
+    assert ev[-1].planner == "llm" and ev[-1].valid and c._llm_fail_streak == 0
+    c.close()
