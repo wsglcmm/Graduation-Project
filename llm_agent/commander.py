@@ -145,6 +145,25 @@ class Commander:
         self._last_status = status
         return trig
 
+    def _capture_geometry(self, drones: Sequence, targets: Sequence[dict], zone) -> Optional[dict]:
+        """給 LLM 的捕捉區事實：capture 進行中用規劃器的捕捉區；否則算出「如果現在改用 capture」的捕捉區。"""
+        if self.capture_cfg is None:
+            return None
+        live = [t for t in targets if t["status"] != "lost"]
+        if not live:
+            return None
+        cur = self.current.target_id if self.current is not None else None
+        tgt = next((t for t in live if t["target_id"] == cur), live[0])
+        existing = zone is not None and self.current is not None and self.current.mode == "capture"
+        if not existing:
+            from planner.capture import propose_zone
+
+            p, v = tgt["position_world_ned_m"], tgt.get("velocity_world_ned_mps") or {"n": 0.0, "e": 0.0}
+            zone = propose_zone(p["n"], p["e"], drones, self.capture_cfg, 0.0, (v["n"], v["e"]))
+        from .fleet_prompt import capture_geometry
+
+        return capture_geometry(drones, tgt, zone, existing)
+
     def _accept(self, plan: Plan, ev_kw: dict, has_target: bool = True) -> AgentEvent:
         self.current, self.current_id = plan, next(self._ids)
         if ev_kw.get("trigger") == "operator":
@@ -173,8 +192,9 @@ class Commander:
         self.events.append(ev)
         return ev
 
-    def tick(self, t_ns: int, drones: Sequence, targets: Sequence[dict]) -> List[AgentEvent]:
-        """每個模擬步呼叫一次。回傳這一步新產生的事件（可能為空）。"""
+    def tick(self, t_ns: int, drones: Sequence, targets: Sequence[dict], zone=None) -> List[AgentEvent]:
+        """每個模擬步呼叫一次。回傳這一步新產生的事件（可能為空）。
+        zone：規劃器目前的捕捉區（capture 進行中才有）；給 LLM 的 capture_geometry 用。"""
         new: List[AgentEvent] = []
         target_ids = [t["target_id"] for t in targets if t["status"] != "lost"]
 
@@ -196,7 +216,8 @@ class Commander:
         else:
             prev = self.current.model_dump() if self.current else None
             standing = None if trig == "operator" else self.standing_order()
-            msgs = build_fleet_messages(summarize_state(drones, targets, t_ns, prev), cmd, standing)
+            geo = self._capture_geometry(drones, targets, zone)
+            msgs = build_fleet_messages(summarize_state(drones, targets, t_ns, prev, geo), cmd, standing)
             self._pending = (self._pool.submit(self.llm.complete, SYSTEM_PROMPT, msgs), trig, t_ns, self.clock(), cmd)
         return new
 

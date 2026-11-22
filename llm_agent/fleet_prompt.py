@@ -42,8 +42,10 @@ SYSTEM_PROMPT = f"""\
 3. 目標 status 是 lost 時用 search；predicted 表示暫時看不到，可以繼續原本的模式。
 4. 角色要考慮位置：離目標後方最近的當 chaser，位於目標行進方向左前、右前的當 blocker。
 5. capture 需要恰好一架 capturer、至少一架 herder，只能用 herder / capturer / blocker / overwatch；
-   離目標「後方」（遠離捕捉區那側）最近的當 herder，最靠近捕捉區（目標前方）的當 capturer。
-   操作員說抓拍、捕捉、驅趕、趕進某處時用 capture。
+   操作員說抓拍、捕捉、驅趕、趕進某處時用 capture。分派角色要看 capture_geometry（由規劃器算好的事實）：
+   to_zone_m 最小的當 capturer，ahead_m 最負（在目標後方）的當 herder，剩下的當 blocker；
+   blocker 比 overwatch 有用（守住側邊才趕得進捕捉區），除非目標常跟丟才用 overwatch。
+   同一次捕捉期間不要無故換角色（無人機要重新飛位置），除非 capture_geometry 顯示原本的分派明顯不合理。
 6. 操作員指令優先；指令不清楚或做不到時輸出 hold，並在 reason 說明。
 7. 若訊息中有「操作員有效指令」，代表操作員先前的指令仍然有效：mode 必須在它允許的範圍內，
    只能調整角色與隊形，不可自行切換到其他模式，直到操作員下新指令。
@@ -54,8 +56,30 @@ def _round(x: float, nd: int = 1) -> float:
     return round(float(x), nd)
 
 
-def summarize_state(drones: Sequence, targets: Sequence[dict], t_ns: int, previous: Optional[dict] = None) -> dict:
-    """把世界狀態整理成 Agent 看得懂的精簡 JSON。drones 為 fusion.DroneState，targets 為 FusedTarget dict。"""
+def capture_geometry(drones: Sequence, target: dict, zone, existing: bool) -> dict:
+    """捕捉區與各機相對位置（確定性計算，給 LLM 當事實用，不是答案）。
+
+    ahead_m：沿「目標 → 捕捉區」方向的投影（正 = 在目標和捕捉區之間或更前面，負 = 在目標後方）；
+    side_m：側向偏移（正 = 面向捕捉區時的右側）。驅趕機應選 ahead_m 最負的、抓拍機選 to_zone_m 最小的。
+    """
+    p = target["position_world_ned_m"]
+    dn, de = zone.n - p["n"], zone.e - p["e"]
+    L = math.hypot(dn, de) or 1.0
+    un, ue = dn / L, de / L
+    rel = []
+    for d in drones:
+        rn, re_ = d.n - p["n"], d.e - p["e"]
+        rel.append({"drone_id": d.drone_id, "ahead_m": _round(rn * un + re_ * ue), "side_m": _round(-rn * ue + re_ * un),
+                    "to_zone_m": _round(math.hypot(d.n - zone.n, d.e - zone.e)), "to_target_m": _round(math.hypot(rn, re_))})
+    return {"target_id": target["target_id"], "zone_n": _round(zone.n), "zone_e": _round(zone.e), "radius_m": zone.radius_m,
+            "target_to_zone_m": _round(L), "status": "使用中" if existing else "若改用 capture，捕捉區會放在這裡",
+            "drones": rel}
+
+
+def summarize_state(drones: Sequence, targets: Sequence[dict], t_ns: int, previous: Optional[dict] = None,
+                    capture: Optional[dict] = None) -> dict:
+    """把世界狀態整理成 Agent 看得懂的精簡 JSON。drones 為 fusion.DroneState，targets 為 FusedTarget dict。
+    capture：capture_geometry() 的結果（有目標且有捕捉設定時）。"""
     out_targets = []
     for t in targets:
         p, v = t["position_world_ned_m"], t["velocity_world_ned_mps"]
@@ -82,6 +106,7 @@ def summarize_state(drones: Sequence, targets: Sequence[dict], t_ns: int, previo
         ],
         "targets": out_targets,
         "previous_plan": previous,
+        **({"capture_geometry": capture} if capture else {}),
     }
 
 
@@ -131,7 +156,12 @@ FEW_SHOT = [
          "formation": {"radius_m": 20.0}, "reason": "目標已 5 秒未出現，在最後位置附近分散搜尋"},
     ),
     (
-        _ex_state(_D3, [_T_NORTH]),
+        {**_ex_state(_D3, [_T_NORTH]), "capture_geometry": {
+            "target_id": 1, "zone_n": 35.0, "zone_e": 0.0, "radius_m": 10.0, "target_to_zone_m": 35.0,
+            "status": "若改用 capture，捕捉區會放在這裡",
+            "drones": [{"drone_id": "uav1", "ahead_m": -20.0, "side_m": 0.0, "to_zone_m": 55.0, "to_target_m": 20.0},
+                       {"drone_id": "uav2", "ahead_m": 5.0, "side_m": -15.0, "to_zone_m": 33.5, "to_target_m": 15.8},
+                       {"drone_id": "uav3", "ahead_m": 5.0, "side_m": 15.0, "to_zone_m": 33.5, "to_target_m": 15.8}]}},
         "把那台車趕進捕捉區抓拍",
         {"mode": "capture", "target_id": 1,
          "assignments": [{"drone_id": "uav1", "role": "herder"}, {"drone_id": "uav2", "role": "blocker"}, {"drone_id": "uav3", "role": "capturer"}],

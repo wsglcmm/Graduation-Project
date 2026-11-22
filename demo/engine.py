@@ -152,7 +152,7 @@ class DemoEngine:
             events = self.commander.tick(self.t_ns, drones, targets, zone=self.planner.capture_zone)
             self.new_drone_events = self.commander.new_drone_events
         else:
-            events = self.commander.tick(self.t_ns, drones, targets)
+            events = self.commander.tick(self.t_ns, drones, targets, zone=self.planner.capture_zone)
         for ev in events:
             self.ledger.on_event(ev, t_s)
         for dev in self.new_drone_events:

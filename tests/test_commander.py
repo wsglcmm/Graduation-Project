@@ -395,3 +395,34 @@ def test_rule_capture_command_before_target_visible_is_kept():
     assert c.current.mode == "search" and c.directive == "capture"
     c.tick(2 * S, DRONES, [target()])
     assert c.current.mode == "capture"
+
+
+def test_llm_state_includes_capture_geometry_facts():
+    """LLM 看得到捕捉區與各機相對位置（事實，不是答案），才能像規則式一樣依位置分派驅趕 / 抓拍。"""
+    from planner.capture import CaptureConfig, CaptureZone
+
+    llm = ScriptedClient([json.dumps(ENC), json.dumps(ENC)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock(), capture_cfg=CaptureConfig(arena_radius_m=200.0))
+    _run(c, 0, [target()])
+    state = json.loads(llm.calls[0][-1]["content"].split("\n", 1)[1].split("\n\n操作員指令")[0])
+    geo = state["capture_geometry"]
+    assert geo["status"].startswith("若改用") and geo["target_id"] == 1
+    by = {d["drone_id"]: d for d in geo["drones"]}
+    assert by["uav1"]["ahead_m"] < 0 < by["uav2"]["ahead_m"]  # uav1 在目標後方（機群中心 → 目標的延長線上才是捕捉區）
+    assert min(by, key=lambda k: by[k]["to_zone_m"]) in ("uav2", "uav3")
+    # capture 進行中：用規劃器的捕捉區
+    c.current = c.current.model_copy(update={"mode": "capture"})
+    llm.calls.clear()
+    c.tick(5 * S, DRONES, [target()], zone=CaptureZone(0.0, 40.0, 10.0))
+    c.wait_idle()
+    c.close()
+    geo = json.loads(llm.calls[0][-1]["content"].split("\n", 1)[1].split("\n\n操作員指令")[0])["capture_geometry"]
+    assert geo["status"] == "使用中" and (geo["zone_n"], geo["zone_e"]) == (0.0, 40.0)
+
+
+def test_no_capture_geometry_without_target_or_config():
+    llm = ScriptedClient([json.dumps(SEARCH), json.dumps(ENC)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    _run(c, 0, [])
+    assert "capture_geometry" not in llm.calls[0][-1]["content"]
+    c.close()

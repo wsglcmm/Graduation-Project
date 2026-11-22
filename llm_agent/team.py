@@ -79,7 +79,7 @@ class Team:
 
     def tick(self, t_ns: int, drones: Sequence, targets: Sequence[dict], zone=None) -> list:
         """先讓協調 Agent 決定角色，再讓每架的 Agent 決定動作。回傳協調 Agent 的事件；各機事件放在 new_drone_events。"""
-        events = self.commander.tick(t_ns, drones, targets)
+        events = self.commander.tick(t_ns, drones, targets, zone)
         self.new_drone_events = []
         plan = self.commander.current
         if plan is not None:
