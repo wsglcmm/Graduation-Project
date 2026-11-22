@@ -40,3 +40,13 @@ def test_strategy_table_counts_failures_and_encircle_reference(tmp_path):
     enc_line = next(l for l in md.splitlines() if l.startswith("| 包圍（對照）"))
     assert "1/2（50%）＊" in enc_line and "無捕捉區" in enc_line
     assert (tmp_path / "out" / "fig_capture_rate.png").stat().st_size > 1000
+
+
+def test_llm_error_classification():
+    from analysis.llm_report import classify
+
+    assert classify(None) == "合法"
+    assert classify("ClientError: 429 RESOURCE_EXHAUSTED") == "API：429 額度用完"
+    assert classify("ServerError: 503 UNAVAILABLE") == "API：503 / 504 伺服器忙或逾時"
+    assert classify("target_id=1 不存在，目前的目標：[]") == "模型：指定了不存在的目標"
+    assert classify("不符合動作格式：data: Extra inputs are not permitted") == "模型：JSON 格式不符"
