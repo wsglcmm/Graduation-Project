@@ -129,30 +129,34 @@ def capture_roles(d: Path, run: str) -> List[str]:
     return seq
 
 
-def improvement_table(before: List[Path], after: List[Path]) -> List[str]:
-    lines = ["| 版本 | 指揮架構 | 下令後抓拍 (s) | 抓到 | 抓拍期間的角色分派（uav1 uav2 uav3） | 用到封鎖機 | API 失敗（503 / 429） |",
-             "|---|---|---|---|---|---|---|"]
-    for label, dirs in (("改善前 d40be5c", before), ("改善後 55312e2", after)):
+def improvement_table(versions: List[tuple]) -> List[str]:
+    """versions：[(標籤, [資料夾…]), …]。同一個版本、同一種架構一列；另列 seed 0–2 的平均，和改善前同 seed 比較。"""
+    lines = ["| 版本 | 指揮架構 | 下令後抓拍 (s) | 抓到 | seed 0–2 平均 (s) | 抓拍期間的角色分派（uav1 uav2 uav3） | 角色鎖定擋下 | API 失敗 |",
+             "|---|---|---|---|---|---|---|---|"]
+    for label, dirs in versions:
         for ag in ("single", "multi"):
             rows = [(d, r) for d in dirs for r in load(d / "runs.csv")
                     if r["scenario_base"] == "switch_capture" and r["agents"] == ag and r.get("drone_planner") in (None, "", "rule")]
             if not rows:
                 continue
+            rows.sort(key=lambda x: int(x[1]["seed"]))
             cap = [x for x in (num(r.get("capture_after_command_s")) for _, r in rows) if x is not None]
+            first3 = [x for x in (num(r.get("capture_after_command_s")) for _, r in rows if int(r["seed"]) <= 2) if x is not None]
             runs = [(d, f"switch_capture{'_multi' if ag == 'multi' else ''}_s{r['seed']}") for d, r in rows]
             roles = [capture_roles(d, run) for d, run in runs]
-            api = collections.Counter()
+            api = locks = 0
             for d, run in runs:
                 for line in (d / "runs" / run / "events.jsonl").read_text(encoding="utf-8").splitlines():
                     e = json.loads(line)
-                    if e.get("planner") == "llm" and not e.get("valid"):
-                        k = classify(e.get("error"))
-                        if k.startswith("API"):
-                            api[k] += 1
+                    locks += "角色鎖定" in (e.get("note") or "")
+                    if e.get("planner") == "llm" and not e.get("valid") and classify(e.get("error")).startswith("API"):
+                        api += 1
+            n3 = sum(int(r["seed"]) <= 2 for _, r in rows)
             lines.append(f"| {label} | {AGENTS_ZH[ag]} | {mean_sd(cap)} | {pct(len(cap), len(rows))} | "
-                         f"{'；'.join('→'.join(x) if x else '（沒進入抓拍）' for x in roles)} | "
-                         f"{sum(any('封' in r for r in x) for x in roles)}/{len(rows)} | {sum(api.values())} |")
-    lines += ["", "角色代號：驅 = 驅趕、拍 = 抓拍、封 = 封鎖、高 = 高空監看，依序是 uav1、uav2、uav3。"]
+                         f"{mean_sd(first3)}{'' if len(first3) == n3 else f'（{n3 - len(first3)} 次未抓到）'} | "
+                         f"{'；'.join('→'.join(x) if x else '（沒進入抓拍）' for x in roles)} | {locks} | {api} |")
+    lines += ["", "角色代號：驅 = 驅趕、拍 = 抓拍、封 = 封鎖、高 = 高空監看，依序是 uav1、uav2、uav3。"
+              "規則式同劇本 seed 0–2：下令後 17.4 s（3/3）。"]
     return lines
 
 
@@ -164,7 +168,8 @@ def main(argv=None):
     ap.add_argument("--commit", default="")
     ap.add_argument("--out", default="analysis/results")
     ap.add_argument("--notes", default="", help="附加在最後的觀察（Markdown）")
-    ap.add_argument("--after", nargs="*", default=[], help="改善後重跑的資料夾（和 --llm 的 switch_capture 比較）")
+    ap.add_argument("--after", nargs="*", default=[],
+                    help="改善後重跑的資料夾，可寫成「標籤=資料夾」（和 --llm 的 switch_capture 比較）")
     args = ap.parse_args(argv)
     dirs = [Path(d) for d in args.llm]
     llm_rows = [r for d in dirs for r in load(d / "runs.csv")]
@@ -184,9 +189,14 @@ def main(argv=None):
         md += quality_table("各機 Agent（第五步，每 10 s 一次 × 3 架）", scan_events(drone_dirs, "drone_events.jsonl"),
                             latencies(drone_dirs, "drone_events.jsonl")) + [""]
     if args.after:
-        md += ["## 表 C：改善驗證（中途改口抓拍，同 seed）", "",
-               "改善內容：`a578198` 把捕捉區與各機相對位置（ahead_m、to_zone_m）放進給 LLM 的世界狀態。", ""]
-        md += improvement_table(dirs, [Path(d) for d in args.after]) + [""]
+        versions = [("改善前 d40be5c", dirs)]
+        for item in args.after:
+            label, _, path = item.rpartition("=")
+            versions.append((label or Path(path).name, [Path(path)]))
+        md += ["## 表 C：改善驗證（中途改口抓拍）", "",
+               "改善內容：`a578198` 把捕捉區與各機相對位置放進給 LLM 的世界狀態；`ea159d0` LLM 先搜尋時保留操作員的抓拍意圖；"
+               "`22e9476` 同一次捕捉期間鎖定角色。", ""]
+        md += improvement_table(versions) + [""]
     if args.notes:
         md += ["## 觀察", "", Path(args.notes).read_text(encoding="utf-8")]
     out = Path(args.out)
