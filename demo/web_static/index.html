@@ -295,6 +295,7 @@ function planCard(p) {
   if (!p.valid) return h + `<div class="reason"><span class="st bad">不合法，未送出</span> ${esc(p.error)}</div></div>`;
   h += `<div><b>→ ${esc(p.mode_zh)}</b>${p.applied ? "" : ' <span class="st gray">已被新指令取代，未套用</span>'}</div><div class="roles">`;
   for (const a of p.assignments) h += `<span class="role" style="background:${roleColor(a.role)}">${esc(a.drone_id)} ${esc(a.role_zh)}</span>`;
+  if (p.note) h += `</div><div class="reason"><span class="st gray">C 調整</span> ${esc(p.note)}`;
   return h + `</div><div class="reason">理由：${esc(p.reason)}</div></div>`;
 }
 function actionCard(a) {

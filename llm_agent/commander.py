@@ -26,7 +26,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .fleet_prompt import SYSTEM_PROMPT, build_fleet_messages, summarize_state
 from .fleet_schema import Plan, parse_plan
@@ -51,6 +51,7 @@ class AgentEvent:
     error: Optional[str] = None
     operator_command: Optional[str] = None
     model: Optional[str] = None  # 實際回應的模型（有備援模型時才看得出差別）；規則式為 None
+    note: Optional[str] = None  # 合法但被 C 調整時的說明（例如抓拍期間角色鎖定）
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)
@@ -73,6 +74,7 @@ class Commander:
         self._pending: Optional[tuple] = None  # (future, trigger, t_ns, start, cmd)
         self._last_ask_ns: Optional[int] = None
         self._last_status: dict = {}
+        self._role_lock: Optional[Tuple[Optional[int], Dict[str, str]]] = None  # (target_id, 各機角色)
         self._ids = (f"p{i:04d}" for i in itertools.count(1))
         self._pending_cmd: Optional[str] = None
         self._lock = threading.Lock()  # command() 可能來自終端機輸入執行緒
@@ -164,7 +166,32 @@ class Commander:
 
         return capture_geometry(drones, tgt, zone, existing)
 
+    def _lock_roles(self, plan: Plan, trigger: str) -> Tuple[Plan, Optional[str]]:
+        """同一次捕捉期間鎖定角色（使用者 11/22 選擇方案 A）。
+
+        11/22 LLM 實測：知道捕捉區後，LLM 在抓拍途中會依最新位置一直換角色，無人機要重新飛位置，
+        抵銷了好處；規則式在同一次捕捉期間本來就固定角色。所以：
+        - capture 開始（或操作員下新指令、換目標）時，照 LLM / 規則式的分派，並記住
+        - 之後同一個目標的 capture 計畫若改了角色，改回記住的分派，並在事件記一筆 note（不算不合法）
+        - 離開 capture 模式就解除
+        """
+        if plan.mode != "capture":
+            self._role_lock = None
+            return plan, None
+        locked = self._role_lock
+        if trigger == "operator" or locked is None or locked[0] != plan.target_id or set(locked[1]) != set(self.drone_ids):
+            self._role_lock = (plan.target_id, {a.drone_id: a.role for a in plan.assignments})
+            return plan, None
+        proposed = {a.drone_id: a.role for a in plan.assignments}
+        if proposed == locked[1]:
+            return plan, None
+        changed = "、".join(f"{d} {proposed[d]}→{locked[1][d]}" for d in sorted(proposed) if proposed[d] != locked[1][d])
+        fixed = plan.model_copy(update={"assignments": [a.model_copy(update={"role": locked[1][a.drone_id]})
+                                                        for a in plan.assignments]})
+        return fixed, f"角色鎖定：同一次捕捉期間維持原分派（提議的 {changed} 未採用）"
+
     def _accept(self, plan: Plan, ev_kw: dict, has_target: bool = True) -> AgentEvent:
+        plan, note = self._lock_roles(plan, ev_kw.get("trigger", ""))
         self.current, self.current_id = plan, next(self._ids)
         if ev_kw.get("trigger") == "operator":
             self.directive, self.directive_text = plan.mode, ev_kw.get("operator_command")
@@ -180,7 +207,7 @@ class Commander:
                 elif not (has_target or intent == "search"):
                     self.directive = self.directive_text = None
                 # 其他情況（看得到目標、指令也不是追 / 包圍 / 捕捉）：LLM 判斷操作員就是要搜尋，維持 search
-        ev = AgentEvent(plan_id=self.current_id, valid=True, plan=plan.model_dump(), **ev_kw)
+        ev = AgentEvent(plan_id=self.current_id, valid=True, plan=plan.model_dump(), note=note, **ev_kw)
         self.events.append(ev)
         return ev
 

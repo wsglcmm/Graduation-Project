@@ -446,3 +446,41 @@ def test_operator_search_command_locks_search():
     _run(c, 0, [target()])
     assert c.directive == "search"
     c.close()
+
+
+CAP = {"mode": "capture", "target_id": 1,
+       "assignments": [{"drone_id": "uav1", "role": "herder"}, {"drone_id": "uav2", "role": "blocker"}, {"drone_id": "uav3", "role": "capturer"}],
+       "formation": {"radius_m": 15.0}, "reason": "驅趕抓拍"}
+CAP_SWAP = {**CAP, "assignments": [{"drone_id": "uav1", "role": "blocker"}, {"drone_id": "uav2", "role": "herder"}, {"drone_id": "uav3", "role": "capturer"}]}
+
+
+def test_capture_roles_locked_until_operator_or_mode_change():
+    """方案 A：同一次捕捉期間 LLM 改角色會被改回原分派（記 note、仍算合法）；操作員下令或離開 capture 才解鎖。"""
+    llm = ScriptedClient([json.dumps(CAP), json.dumps(CAP_SWAP), json.dumps(CAP_SWAP), json.dumps(ENC), json.dumps(CAP_SWAP)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    c.command("把那台車趕進捕捉區抓拍")
+    _run(c, 0)
+    roles = lambda: {a.drone_id: a.role for a in c.current.assignments}  # noqa: E731
+    assert roles()["uav1"] == "herder"
+    ev = _run(c, 2 * S)  # 定期：LLM 想把 uav1 / uav2 對調 → 鎖住
+    assert ev[-1].valid and ev[-1].plan_id is not None and "角色鎖定" in ev[-1].note
+    assert roles() == {"uav1": "herder", "uav2": "blocker", "uav3": "capturer"}
+    assert ev[-1].plan["assignments"][0]["role"] == "herder"  # 事件裡記的是實際套用的分派
+    c.command("換一下，uav2 改去驅趕")  # 操作員下令：解鎖，照新分派
+    ev = _run(c, 4 * S)
+    assert ev[-1].note is None and roles()["uav2"] == "herder"
+    c.directive = c.directive_text = None
+    _run(c, 6 * S)  # 離開 capture（包圍）→ 解除鎖定
+    assert c.current.mode == "encircle" and c._role_lock is None
+    ev = _run(c, 8 * S)  # 再進 capture：重新鎖定成新的分派
+    assert ev[-1].note is None and roles()["uav1"] == "blocker"
+    c.close()
+
+
+def test_role_lock_resets_when_target_changes():
+    llm = ScriptedClient([json.dumps(CAP), json.dumps({**CAP_SWAP, "target_id": 2})])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    _run(c, 0, [target(), target(tid=2, n=50)])
+    ev = _run(c, 2 * S, [target(), target(tid=2, n=50)])
+    assert ev[-1].note is None and {a.drone_id: a.role for a in c.current.assignments}["uav1"] == "blocker"
+    c.close()

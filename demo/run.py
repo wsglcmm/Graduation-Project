@@ -102,6 +102,8 @@ def event_line(ev) -> str:
     head = f"[{t:5.1f}s] {who} {ev.latency_ms:5.0f}ms  {MODE_ZH[p['mode']]}  {roles}"
     if ev.plan_id is None:  # 已被操作員新指令取代
         head += "（未套用）"
+    if getattr(ev, "note", None):
+        head += f"\n          {ev.note}"
     return head + f"\n          {p['reason']}"
 
 

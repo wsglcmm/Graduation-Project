@@ -28,7 +28,8 @@ def _plan_row(ev) -> dict:
     return {
         "kind": "plan", "t": _r(ev.timestamp_ns / 1e9), "plan_id": ev.plan_id, "trigger": ev.trigger,
         "trigger_zh": TRIGGER_ZH.get(ev.trigger, ev.trigger), "planner": ev.planner, "latency_ms": _r(ev.latency_ms, 0),
-        "valid": ev.valid, "applied": ev.plan_id is not None, "error": ev.error, "operator_command": ev.operator_command,
+        "valid": ev.valid, "applied": ev.plan_id is not None, "error": ev.error, "note": getattr(ev, "note", None),
+        "operator_command": ev.operator_command,
         "model": ev.model, "mode": p.get("mode"), "mode_zh": MODE_ZH.get(p.get("mode"), p.get("mode")),
         "reason": p.get("reason"),
         "assignments": [{"drone_id": a["drone_id"], "role": a["role"], "role_zh": ROLE_ZH.get(a["role"], a["role"])}
@@ -42,7 +43,7 @@ def _plan_feed(events) -> list:
     for ev in events:
         p = ev.plan or {}
         key = (p.get("mode"), tuple((a["drone_id"], a["role"]) for a in p.get("assignments", [])))
-        if ev.trigger == "operator" or not ev.valid or ev.plan_id is None or key != last_key:
+        if ev.trigger == "operator" or not ev.valid or ev.plan_id is None or key != last_key or getattr(ev, "note", None):
             out.append(_plan_row(ev))
         if ev.valid and ev.plan_id is not None:
             last_key = key
