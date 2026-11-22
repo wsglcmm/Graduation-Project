@@ -112,6 +112,50 @@ def compare_table(llm_rows: List[dict], rule_rows: List[dict]) -> List[str]:
     return lines
 
 
+ROLE_ZH = {"herder": "驅", "capturer": "拍", "blocker": "封", "overwatch": "高"}
+
+
+def capture_roles(d: Path, run: str) -> List[str]:
+    """一次執行中，capture 計畫（有套用的）出現過的角色分派，例如「驅高拍」= uav1 驅趕、uav2 高空、uav3 抓拍。"""
+    seq = []
+    f = d / "runs" / run / "events.jsonl"
+    for line in f.read_text(encoding="utf-8").splitlines():
+        e = json.loads(line)
+        p = e.get("plan") or {}
+        if p.get("mode") == "capture" and e.get("plan_id") is not None:
+            r = "".join(ROLE_ZH.get(a["role"], "?") for a in sorted(p["assignments"], key=lambda a: a["drone_id"]))
+            if not seq or seq[-1] != r:
+                seq.append(r)
+    return seq
+
+
+def improvement_table(before: List[Path], after: List[Path]) -> List[str]:
+    lines = ["| 版本 | 指揮架構 | 下令後抓拍 (s) | 抓到 | 抓拍期間的角色分派（uav1 uav2 uav3） | 用到封鎖機 | API 失敗（503 / 429） |",
+             "|---|---|---|---|---|---|---|"]
+    for label, dirs in (("改善前 d40be5c", before), ("改善後 55312e2", after)):
+        for ag in ("single", "multi"):
+            rows = [(d, r) for d in dirs for r in load(d / "runs.csv")
+                    if r["scenario_base"] == "switch_capture" and r["agents"] == ag and r.get("drone_planner") in (None, "", "rule")]
+            if not rows:
+                continue
+            cap = [x for x in (num(r.get("capture_after_command_s")) for _, r in rows) if x is not None]
+            runs = [(d, f"switch_capture{'_multi' if ag == 'multi' else ''}_s{r['seed']}") for d, r in rows]
+            roles = [capture_roles(d, run) for d, run in runs]
+            api = collections.Counter()
+            for d, run in runs:
+                for line in (d / "runs" / run / "events.jsonl").read_text(encoding="utf-8").splitlines():
+                    e = json.loads(line)
+                    if e.get("planner") == "llm" and not e.get("valid"):
+                        k = classify(e.get("error"))
+                        if k.startswith("API"):
+                            api[k] += 1
+            lines.append(f"| {label} | {AGENTS_ZH[ag]} | {mean_sd(cap)} | {pct(len(cap), len(rows))} | "
+                         f"{'；'.join('→'.join(x) if x else '（沒進入抓拍）' for x in roles)} | "
+                         f"{sum(any('封' in r for r in x) for x in roles)}/{len(rows)} | {sum(api.values())} |")
+    lines += ["", "角色代號：驅 = 驅趕、拍 = 抓拍、封 = 封鎖、高 = 高空監看，依序是 uav1、uav2、uav3。"]
+    return lines
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="LLM 版本 vs 規則式對照與 LLM 輸出品質")
     ap.add_argument("--llm", nargs="+", required=True, help="demo.benchmark --planner llm 的輸出資料夾")
@@ -120,6 +164,7 @@ def main(argv=None):
     ap.add_argument("--commit", default="")
     ap.add_argument("--out", default="analysis/results")
     ap.add_argument("--notes", default="", help="附加在最後的觀察（Markdown）")
+    ap.add_argument("--after", nargs="*", default=[], help="改善後重跑的資料夾（和 --llm 的 switch_capture 比較）")
     args = ap.parse_args(argv)
     dirs = [Path(d) for d in args.llm]
     llm_rows = [r for d in dirs for r in load(d / "runs.csv")]
@@ -138,6 +183,10 @@ def main(argv=None):
                             latencies(drone_dirs, "events.jsonl")) + [""]
         md += quality_table("各機 Agent（第五步，每 10 s 一次 × 3 架）", scan_events(drone_dirs, "drone_events.jsonl"),
                             latencies(drone_dirs, "drone_events.jsonl")) + [""]
+    if args.after:
+        md += ["## 表 C：改善驗證（中途改口抓拍，同 seed）", "",
+               "改善內容：`a578198` 把捕捉區與各機相對位置（ahead_m、to_zone_m）放進給 LLM 的世界狀態。", ""]
+        md += improvement_table(dirs, [Path(d) for d in args.after]) + [""]
     if args.notes:
         md += ["## 觀察", "", Path(args.notes).read_text(encoding="utf-8")]
     out = Path(args.out)
