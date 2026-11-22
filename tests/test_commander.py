@@ -1,0 +1,504 @@
+"""規則式指揮官、LLM 客戶端工具與背景指揮迴圈的測試（LLM 一律用 ScriptedClient 模擬）。"""
+import json
+
+import pytest
+
+from fleet_fixtures import DRONES, ENC, IDS, S, target  # noqa: F401
+from llm_agent.commander import Commander
+from llm_agent.fleet_schema import parse_plan
+from llm_agent.llm_client import ScriptedClient, load_dotenv
+from llm_agent.rule_planner import rule_plan
+
+
+def test_load_dotenv_does_not_override(tmp_path, monkeypatch):
+    f = tmp_path / ".env"
+    f.write_text("# comment\nFOO_A=1\nFOO_B='two'\n", encoding="utf-8")
+    monkeypatch.setenv("FOO_A", "keep")
+    monkeypatch.delenv("FOO_B", raising=False)
+    load_dotenv(f)
+    import os
+
+    assert os.environ["FOO_A"] == "keep" and os.environ["FOO_B"] == "two"
+
+
+def test_load_dotenv_tolerates_bom(tmp_path, monkeypatch):
+    f = tmp_path / ".env"
+    f.write_bytes("FOO_BOM=x\n".encode("utf-8-sig"))  # Windows 記事本可能存成有 BOM 的 UTF-8
+    monkeypatch.delenv("FOO_BOM", raising=False)
+    load_dotenv(f)
+    import os
+
+    assert os.environ["FOO_BOM"] == "x"
+
+
+
+
+# ---------- 規則式 ----------
+def test_rule_search_when_no_target():
+    p = rule_plan(DRONES, [])
+    assert p.mode == "search" and {a.role for a in p.assignments} == {"searcher"}
+
+
+def test_rule_track_when_far_then_encircle_when_close():
+    assert rule_plan(DRONES, [target(n=200)]).mode == "track"
+    p = rule_plan(DRONES, [target()])
+    assert p.mode == "encircle"
+    roles = {a.drone_id: a.role for a in p.assignments}
+    # 目標往北：uav1 在後方 → chaser；uav2 在西（左前）、uav3 在東（右前）
+    assert roles == {"uav1": "chaser", "uav2": "blocker_left", "uav3": "blocker_right"}
+
+
+@pytest.mark.parametrize("cmd, mode", [("請返航", "return_home"), ("先懸停", "hold"), ("三架包圍它", "encircle"), ("幫我拍照", "hold")])
+def test_rule_follows_operator_keywords(cmd, mode):
+    assert rule_plan(DRONES, [target(n=200)], cmd).mode == mode
+
+
+def test_rule_plans_always_pass_validation():
+    for tg in ([], [target()], [target(n=300)], [target(status="lost")]):
+        p = rule_plan(DRONES, tg)
+        tids = [t["target_id"] for t in tg if t["status"] != "lost"]
+        assert parse_plan(p.model_dump_json(), IDS, tids).ok
+
+
+# ---------- 指揮迴圈 ----------
+class FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        self.t += 0.5
+        return self.t
+
+
+def test_rule_commander_periodic_and_operator_triggers():
+    c = Commander(IDS, llm=None, period_s=2.0, clock=FakeClock())
+    ev = c.tick(0, DRONES, [target()])
+    assert ev[0].trigger == "target_found" and ev[0].planner == "rule" and ev[0].valid
+    assert c.tick(1 * S, DRONES, [target()]) == []
+    assert c.tick(2 * S, DRONES, [target()])[0].trigger == "periodic"
+    c.command("懸停")
+    ev = c.tick(int(2.1 * S), DRONES, [target()])
+    assert ev[0].trigger == "operator" and c.current.mode == "hold"
+
+
+def test_llm_commander_accepts_valid_plan_in_background():
+    llm = ScriptedClient([json.dumps(ENC)])
+    c = Commander(IDS, llm=llm, period_s=2.0, clock=FakeClock())
+    assert c.tick(0, DRONES, [target()]) == []  # 已送出，結果還沒回來
+    c.wait_idle()
+    ev = c.tick(S // 10, DRONES, [target()])
+    assert ev[0].planner == "llm" and ev[0].valid and c.current.mode == "encircle" and ev[0].latency_ms > 0
+    assert c.current_id == ev[0].plan_id
+    sent = llm.calls[0][-1]["content"]
+    assert '"uav1"' in sent and '"target_id": 1' in sent
+    c.close()
+
+
+def test_invalid_llm_output_keeps_previous_plan():
+    llm = ScriptedClient([json.dumps(ENC), json.dumps({**ENC, "target_id": 99})])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    c.tick(0, DRONES, [target()]); c.wait_idle(); c.tick(1, DRONES, [target()])
+    first = c.current_id
+    c.tick(2 * S, DRONES, [target()]); c.wait_idle()
+    ev = c.tick(2 * S + 1, DRONES, [target()])
+    assert not ev[0].valid and "不存在" in ev[0].error
+    assert c.current_id == first  # 沿用上一個合法計畫
+    c.close()
+
+
+def test_llm_exception_with_no_plan_falls_back_to_rule():
+    c = Commander(IDS, llm=ScriptedClient([TimeoutError("逾時")]), clock=FakeClock())
+    c.tick(0, DRONES, [target()]); c.wait_idle()
+    ev = c.tick(1, DRONES, [target()])
+    assert [e.planner for e in ev] == ["llm", "rule"]
+    assert not ev[0].valid and "TimeoutError" in ev[0].error
+    assert ev[1].valid and c.current is not None
+    c.close()
+
+
+def test_target_lost_triggers_immediately():
+    c = Commander(IDS, llm=None, period_s=100.0, clock=FakeClock())
+    c.tick(0, DRONES, [target()])
+    ev = c.tick(S, DRONES, [target(status="lost")])
+    assert ev[0].trigger == "target_lost" and c.current.mode == "search"
+
+
+# ---------- Anthropic 客戶端（不連網：用 httpx2 的 MockTransport 攔截請求）----------
+def test_anthropic_client_request_and_text_extraction(monkeypatch):
+    anthropic = pytest.importorskip("anthropic")
+    httpx = pytest.importorskip("httpx2")  # anthropic 2.x 使用 httpx2
+    from llm_agent.llm_client import AnthropicClient
+
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+            "content": [{"type": "thinking", "thinking": "...", "signature": "x"}, {"type": "text", "text": '{"mode": "hold"}'}],
+            "stop_reason": "end_turn", "stop_sequence": None,
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        })
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    sdk = anthropic.Anthropic(api_key="test-key", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    client = AnthropicClient(sdk_client=sdk, effort="low")
+    out = client.complete("系統提示", [{"role": "user", "content": "嗨"}])
+    assert out == '{"mode": "hold"}'  # thinking block 被略過，只取 text
+    body = seen["body"]
+    assert body["model"] == "claude-haiku-5-5" and body["system"] == "系統提示"
+    assert body["output_config"] == {"effort": "low"}
+    assert "temperature" not in body  # Haiku 5.5 文件建議不要送 temperature
+
+
+def test_anthropic_client_requires_key(monkeypatch):
+    pytest.importorskip("anthropic")
+    from llm_agent.llm_client import AnthropicClient
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        AnthropicClient()
+
+
+# ---------- Gemini 客戶端（不連網：用 httpx 的 MockTransport 攔截請求）----------
+def test_gemini_client_request_and_text(monkeypatch):
+    pytest.importorskip("google.genai")
+    httpx = pytest.importorskip("httpx")
+    from google import genai
+    from llm_agent.llm_client import GeminiClient
+
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"candidates": [{"content": {"role": "model", "parts": [{"text": '{"mode": "hold"}'}]}, "finishReason": "STOP"}]})
+
+    sdk = genai.Client(api_key="test-key", http_options={"httpx_client": httpx.Client(transport=httpx.MockTransport(handler))})
+    client = GeminiClient(sdk_client=sdk, thinking="")
+    out = client.complete("系統提示", [{"role": "user", "content": "例子"}, {"role": "assistant", "content": "{}"}, {"role": "user", "content": "嗨"}])
+    assert out == '{"mode": "hold"}'
+    body = seen["body"]
+    assert "gemini-3.1-flash-lite" in seen["url"]  # 預設主模型
+    assert client.last_model == "gemini-3.1-flash-lite"
+    assert [c["role"] for c in body["contents"]] == ["user", "model", "user"]  # assistant → model
+    assert body["systemInstruction"]["parts"][0]["text"] == "系統提示"
+    assert body["generationConfig"]["responseMimeType"] == "application/json"
+
+
+def test_gemini_client_requires_key(monkeypatch):
+    pytest.importorskip("google.genai")
+    from llm_agent.llm_client import GeminiClient
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
+        GeminiClient()
+
+
+def test_create_llm_client_rejects_unknown_provider():
+    from llm_agent.llm_client import create_llm_client
+
+    with pytest.raises(ValueError, match="AGENT_PROVIDER"):
+        create_llm_client("openai")
+
+
+def _gemini_with(handler, **kw):
+    pytest.importorskip("google.genai")
+    httpx = pytest.importorskip("httpx")
+    from google import genai
+    from llm_agent.llm_client import GeminiClient
+
+    sdk = genai.Client(api_key="test-key", http_options={"httpx_client": httpx.Client(transport=httpx.MockTransport(handler))})
+    return GeminiClient(sdk_client=sdk, **kw)
+
+
+def _ok(httpx, text='{"mode": "hold"}'):
+    return httpx.Response(200, json={"candidates": [{"content": {"role": "model", "parts": [{"text": text}]}, "finishReason": "STOP"}]})
+
+
+def test_gemini_falls_back_to_next_model_on_503():
+    httpx = pytest.importorskip("httpx")
+    urls = []
+
+    def handler(request):
+        urls.append(str(request.url))
+        if "model-a" in str(request.url):
+            return httpx.Response(503, json={"error": {"code": 503, "message": "high demand", "status": "UNAVAILABLE"}})
+        return _ok(httpx)
+
+    client = _gemini_with(handler, model="model-a", fallbacks="model-b", thinking="")
+    assert client.complete("s", [{"role": "user", "content": "hi"}]) == '{"mode": "hold"}'
+    assert ["model-a" in urls[0], "model-b" in urls[1]] == [True, True]
+    assert client.last_model == "model-b"
+
+
+def test_gemini_does_not_fall_back_on_bad_key():
+    httpx = pytest.importorskip("httpx")
+    urls = []
+
+    def handler(request):
+        urls.append(str(request.url))
+        return httpx.Response(400, json={"error": {"code": 400, "message": "API key not valid", "status": "INVALID_ARGUMENT"}})
+
+    client = _gemini_with(handler, model="model-a", fallbacks="model-b", thinking="")
+    with pytest.raises(Exception, match="API key"):
+        client.complete("s", [{"role": "user", "content": "hi"}])
+    assert len(urls) == 1  # 金鑰錯誤換模型也沒用，直接回報
+
+
+def test_gemini_all_models_busy_raises_last_error():
+    httpx = pytest.importorskip("httpx")
+
+    def handler(request):
+        return httpx.Response(503, json={"error": {"code": 503, "message": "high demand", "status": "UNAVAILABLE"}})
+
+    client = _gemini_with(handler, model="model-a", fallbacks="model-b, model-c", thinking="")
+    assert client.models == ["model-a", "model-b", "model-c"]
+    with pytest.raises(Exception, match="503"):
+        client.complete("s", [{"role": "user", "content": "hi"}])
+
+
+def test_gemini_drops_unsupported_thinking_level():
+    httpx = pytest.importorskip("httpx")
+    bodies = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        if "thinkingConfig" in body.get("generationConfig", {}):
+            return httpx.Response(400, json={"error": {"code": 400, "message": "thinking_level MINIMAL is not supported", "status": "INVALID_ARGUMENT"}})
+        return _ok(httpx)
+
+    client = _gemini_with(handler, model="model-a", fallbacks="", thinking="minimal")
+    assert client.complete("s", [{"role": "user", "content": "hi"}]) == '{"mode": "hold"}'
+    client.complete("s", [{"role": "user", "content": "hi"}])
+    assert len(bodies) == 3  # 第一次 400 → 不帶 thinking 重送；之後記住，不再送 thinking
+
+
+# ---------- 操作員指令優先 ----------
+HOLD = {"mode": "hold", "target_id": None, "assignments": [{"drone_id": i, "role": "idle"} for i in IDS],
+        "formation": {"radius_m": 15.0}, "reason": "操作員要求懸停"}
+SEARCH = {"mode": "search", "target_id": None, "assignments": [{"drone_id": i, "role": "searcher"} for i in IDS],
+          "formation": {"radius_m": 20.0}, "reason": "操作員要求搜尋"}
+
+
+def _run(c, t_ns, targets=None):
+    """送出（若有觸發）→ 等背景完成 → 收結果。回傳收集到的事件。"""
+    targets = targets if targets is not None else [target()]
+    evs = c.tick(t_ns, DRONES, targets)
+    c.wait_idle()
+    return evs + c.tick(t_ns + 1, DRONES, targets)
+
+
+def test_operator_hold_pauses_agent_until_next_command():
+    llm = ScriptedClient([json.dumps(ENC), json.dumps(HOLD), json.dumps(ENC)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    _run(c, 0)
+    c.command("hold position")
+    ev = _run(c, 1 * S)
+    assert ev[-1].trigger == "operator" and c.current.mode == "hold" and c.paused
+    for k in range(2, 10):  # 定期觸發與目標事件都不再問 Agent
+        assert _run(c, k * S, [target(status="lost") if k % 2 else target()]) == []
+    assert len(llm.calls) == 2 and c.current.mode == "hold"
+    c.command("三架一起把那台車包圍起來")
+    ev = _run(c, 10 * S)
+    assert ev[-1].trigger == "operator" and c.current.mode == "encircle" and not c.paused
+    c.close()
+
+
+def test_search_directive_rejects_periodic_mode_change_and_tells_llm():
+    llm = ScriptedClient([json.dumps(SEARCH), json.dumps(ENC)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    c.command("search")
+    _run(c, 0)
+    first = c.current_id
+    ev = _run(c, 2 * S)
+    assert ev[-1].trigger == "periodic" and not ev[-1].valid and "違反操作員指令" in ev[-1].error
+    assert c.current_id == first and c.current.mode == "search"
+    assert "操作員有效指令" in llm.calls[1][-1]["content"] and "search" in llm.calls[1][-1]["content"]
+    assert "操作員有效指令" not in llm.calls[0][-1]["content"]  # 新指令本身不帶舊限制
+    c.close()
+
+
+def test_operator_command_is_retried_after_failure():
+    llm = ScriptedClient([RuntimeError("503 UNAVAILABLE"), json.dumps(HOLD)])
+    c = Commander(IDS, llm=llm, period_s=100.0, clock=FakeClock())
+    c.command("hold")
+    ev = _run(c, 0)
+    assert not ev[-1].valid and "自動重送 1/2" in ev[-1].error
+    ev = _run(c, 1 * S)
+    assert ev[-1].valid and ev[-1].trigger == "operator" and ev[-1].operator_command == "hold" and c.current.mode == "hold"
+    c.close()
+
+
+def test_operator_command_falls_back_to_rule_after_retries():
+    llm = ScriptedClient([RuntimeError("503")] * 3)
+    c = Commander(IDS, llm=llm, period_s=100.0, clock=FakeClock())
+    c.command("請返航")
+    evs = []
+    for k in range(3):
+        evs += _run(c, k * S)
+    assert [e.planner for e in evs] == ["llm", "llm", "llm", "rule"]
+    assert evs[-1].valid and c.current.mode == "return_home" and c.paused
+    c.close()
+
+
+def test_result_in_flight_is_superseded_by_new_operator_command():
+    llm = ScriptedClient([json.dumps(ENC), json.dumps(HOLD)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    c.tick(0, DRONES, [target()])  # 定期請求送出
+    c.command("hold")  # 結果回來前操作員下指令
+    c.wait_idle()
+    ev = c.tick(1, DRONES, [target()])
+    assert ev[0].plan_id is None and ev[0].valid and "取代" in ev[0].error and c.current is None
+    ev = _run(c, 2)
+    assert ev[-1].trigger == "operator" and c.current.mode == "hold"
+    c.close()
+
+
+def test_rule_commander_respects_directive():
+    c = Commander(IDS, llm=None, period_s=1.0, clock=FakeClock())
+    c.tick(0, DRONES, [target()])
+    c.command("先懸停")
+    c.tick(1 * S, DRONES, [target()])
+    assert c.paused and c.tick(5 * S, DRONES, [target()]) == []
+    c.command("搜尋")
+    c.tick(6 * S, DRONES, [target()])
+    assert c.current.mode == "search"
+    assert c.tick(8 * S, DRONES, [target()])[0].plan["mode"] == "search"  # 定期也維持搜尋
+
+
+def test_command_ignores_blank_input():
+    c = Commander(IDS, llm=None, period_s=100.0, clock=FakeClock())
+    c.tick(0, DRONES, [target()])
+    c.command("   ")
+    assert c.tick(1, DRONES, [target()]) == []
+
+
+def test_operator_encircle_without_visible_target_remembers_intent():
+    llm = ScriptedClient([json.dumps(SEARCH), json.dumps(ENC)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    c.command("三架一起把那台車包圍起來")
+    _run(c, 0, [])  # 還沒有目標 → 只能搜尋
+    assert c.current.mode == "search" and c.directive == "encircle"  # 記住要包圍，但允許先搜尋
+    ev = _run(c, 2 * S)  # 發現目標後可以自己切到包圍
+    assert ev[-1].valid and c.current.mode == "encircle"
+    c.close()
+
+
+def test_rule_capture_command_before_target_visible_is_kept():
+    """「把車趕進捕捉區抓拍」時還看不到車：先搜尋，發現後照指令捕捉，不會回到預設策略。"""
+    c = Commander(IDS, llm=None, period_s=1.0, clock=FakeClock())
+    c.command("把那台車趕進捕捉區抓拍")
+    c.tick(0, DRONES, [])
+    assert c.current.mode == "search" and c.directive == "capture"
+    c.tick(2 * S, DRONES, [target()])
+    assert c.current.mode == "capture"
+
+
+def test_llm_state_includes_capture_geometry_facts():
+    """LLM 看得到捕捉區與各機相對位置（事實，不是答案），才能像規則式一樣依位置分派驅趕 / 抓拍。"""
+    from planner.capture import CaptureConfig, CaptureZone
+
+    llm = ScriptedClient([json.dumps(ENC), json.dumps(ENC)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock(), capture_cfg=CaptureConfig(arena_radius_m=200.0))
+    _run(c, 0, [target()])
+    state = json.loads(llm.calls[0][-1]["content"].split("\n", 1)[1].split("\n\n操作員指令")[0])
+    geo = state["capture_geometry"]
+    assert geo["status"].startswith("若改用") and geo["target_id"] == 1
+    by = {d["drone_id"]: d for d in geo["drones"]}
+    assert by["uav1"]["ahead_m"] < 0 < by["uav2"]["ahead_m"]  # uav1 在目標後方（機群中心 → 目標的延長線上才是捕捉區）
+    assert min(by, key=lambda k: by[k]["to_zone_m"]) in ("uav2", "uav3")
+    # capture 進行中：用規劃器的捕捉區
+    c.current = c.current.model_copy(update={"mode": "capture"})
+    llm.calls.clear()
+    c.tick(5 * S, DRONES, [target()], zone=CaptureZone(0.0, 40.0, 10.0))
+    c.wait_idle()
+    c.close()
+    geo = json.loads(llm.calls[0][-1]["content"].split("\n", 1)[1].split("\n\n操作員指令")[0])["capture_geometry"]
+    assert geo["status"] == "使用中" and (geo["zone_n"], geo["zone_e"]) == (0.0, 40.0)
+
+
+def test_no_capture_geometry_without_target_or_config():
+    llm = ScriptedClient([json.dumps(SEARCH), json.dumps(ENC)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    _run(c, 0, [])
+    assert "capture_geometry" not in llm.calls[0][-1]["content"]
+    c.close()
+
+
+def test_operator_capture_answered_with_search_keeps_capture_intent_even_if_target_predicted():
+    """11/22 實測：目標 predicted 時 LLM 回 search，指令不能因此被鎖成「只能搜尋」。"""
+    llm = ScriptedClient([json.dumps(SEARCH)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    c.command("改成把那台車趕進捕捉區抓拍")
+    _run(c, 0, [target(status="predicted")])
+    assert c.current.mode == "search" and c.directive == "capture"
+    assert "capture" in c.standing_order()
+    c.close()
+
+
+def test_operator_search_command_locks_search():
+    llm = ScriptedClient([json.dumps(SEARCH)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    c.command("先到處找找看")
+    _run(c, 0, [target()])
+    assert c.directive == "search"
+    c.close()
+
+
+CAP = {"mode": "capture", "target_id": 1,
+       "assignments": [{"drone_id": "uav1", "role": "herder"}, {"drone_id": "uav2", "role": "blocker"}, {"drone_id": "uav3", "role": "capturer"}],
+       "formation": {"radius_m": 15.0}, "reason": "驅趕抓拍"}
+CAP_SWAP = {**CAP, "assignments": [{"drone_id": "uav1", "role": "blocker"}, {"drone_id": "uav2", "role": "herder"}, {"drone_id": "uav3", "role": "capturer"}]}
+
+
+def test_capture_roles_locked_until_operator_or_mode_change():
+    """方案 A：同一次捕捉期間 LLM 改角色會被改回原分派（記 note、仍算合法）；操作員下令或離開 capture 才解鎖。"""
+    llm = ScriptedClient([json.dumps(CAP), json.dumps(CAP_SWAP), json.dumps(CAP_SWAP), json.dumps(ENC), json.dumps(CAP_SWAP)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    c.command("把那台車趕進捕捉區抓拍")
+    _run(c, 0)
+    roles = lambda: {a.drone_id: a.role for a in c.current.assignments}  # noqa: E731
+    assert roles()["uav1"] == "herder"
+    ev = _run(c, 2 * S)  # 定期：LLM 想把 uav1 / uav2 對調 → 鎖住
+    assert ev[-1].valid and ev[-1].plan_id is not None and "角色鎖定" in ev[-1].note
+    assert roles() == {"uav1": "herder", "uav2": "blocker", "uav3": "capturer"}
+    assert ev[-1].plan["assignments"][0]["role"] == "herder"  # 事件裡記的是實際套用的分派
+    c.command("換一下，uav2 改去驅趕")  # 操作員下令：解鎖，照新分派
+    ev = _run(c, 4 * S)
+    assert ev[-1].note is None and roles()["uav2"] == "herder"
+    c.directive = c.directive_text = None
+    _run(c, 6 * S)  # 離開 capture（包圍）→ 解除鎖定
+    assert c.current.mode == "encircle" and c._role_lock is None
+    ev = _run(c, 8 * S)  # 再進 capture：重新鎖定成新的分派
+    assert ev[-1].note is None and roles()["uav1"] == "blocker"
+    c.close()
+
+
+def test_role_lock_resets_when_target_changes():
+    llm = ScriptedClient([json.dumps(CAP), json.dumps({**CAP_SWAP, "target_id": 2})])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    _run(c, 0, [target(), target(tid=2, n=50)])
+    ev = _run(c, 2 * S, [target(), target(tid=2, n=50)])
+    assert ev[-1].note is None and {a.drone_id: a.role for a in c.current.assignments}["uav1"] == "blocker"
+    c.close()
+
+
+def test_rule_takes_over_after_consecutive_llm_failures_and_follows_directive():
+    """11/22 實測：額度用完後 LLM 一直 429，計畫停在 search，操作員的抓拍沒執行。連續失敗 3 次改用規則式接手。"""
+    boom = RuntimeError("429 RESOURCE_EXHAUSTED")
+    llm = ScriptedClient([json.dumps(SEARCH), boom, boom, boom, json.dumps(CAP)])
+    c = Commander(IDS, llm=llm, period_s=1.0, clock=FakeClock())
+    c.command("改成把那台車趕進捕捉區抓拍")
+    _run(c, 0, [target(status="lost")])  # 看不到車 → search，但記住要抓拍
+    assert c.current.mode == "search" and c.directive == "capture"
+    ev = _run(c, 2 * S)
+    ev += _run(c, 4 * S)
+    assert c.current.mode == "search" and all(not e.valid for e in ev)  # 失敗 2 次：沿用上一個計畫
+    ev = _run(c, 6 * S)  # 第 3 次失敗 → 規則式照有效指令接手
+    assert ev[-1].planner == "rule" and "連續 3 次失敗" in ev[-1].error and c.current.mode == "capture"
+    ev = _run(c, 8 * S)  # LLM 恢復：交回 LLM
+    assert ev[-1].planner == "llm" and ev[-1].valid and c._llm_fail_streak == 0
+    c.close()

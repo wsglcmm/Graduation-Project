@@ -1,0 +1,199 @@
+"""C 端與 A 的 SITL 連線：用模仿 A 協定的假伺服器測試（不需要學校伺服器）。"""
+import json
+import math
+import socket
+import time
+
+import pytest
+
+pytest.importorskip("websockets")
+
+from fleet_link import FleetLink, LinkError, SitlFleet  # noqa: E402
+from fleet_link.fake_server import FakeAServer, FakeConfig, FakeFleet  # noqa: E402
+
+FAST = FakeConfig(climb_mps=30.0)  # 測試用：起飛幾乎瞬間完成
+IDS = ["uav1", "uav2", "uav3"]
+
+
+def gp(did, n, e, d=-30.0, **kw):
+    return {"schema_version": "0.2.0", "plan_id": "p1", "drone_id": did, "timestamp_ns": 1,
+            "position_world_ned_m": {"n": n, "e": e, "d": d}, **kw}
+
+
+@pytest.fixture
+def server():
+    with FakeAServer(FAST, port=0) as srv:
+        yield srv
+
+
+@pytest.fixture
+def link(server):
+    with FleetLink(server.uri, heartbeat_s=0.5) as lk:
+        lk.wait_for_poses(IDS)
+        yield lk
+
+
+# ---------- 假伺服器的安全規則（不經網路）----------
+def airborne_fleet():
+    f = FakeFleet(FAST)
+    for d in f.drones:
+        d.mode, d.h = "hold", d.layer
+    return f
+
+
+def test_fake_fleet_layers_push_fence_speed():
+    f = airborne_fleet()
+    a = f.goal_point(gp("uav1", 10, 0, d=-50, max_speed_mps=10))
+    assert a["accepted"] and a["adjusted"] and a["applied_position_world_ned_m"]["d"] == -25.0
+    assert "高度層 25" in a["reason"] and "上限 3" in a["reason"]
+    b = f.goal_point(gp("uav2", 12, 1))  # 距 uav1 目標點 2.2 m → 推開到 6 m
+    p = b["applied_position_world_ned_m"]
+    assert b["adjusted"] and math.hypot(p["n"] - 10, p["e"] - 0) == pytest.approx(6.0)
+    c = f.goal_point(gp("uav3", 200, -5, d=-35))
+    assert c["applied_position_world_ned_m"]["n"] == 80.0 and "邊界" in c["reason"]
+
+
+def test_fake_fleet_rejects_like_a():
+    f = FakeFleet(FAST)  # 全部還在地上
+    assert "地上" in f.goal_point(gp("uav1", 0, 0))["reason"]
+    f = airborne_fleet()
+    assert not f.goal_point(gp("uav9", 0, 0))["accepted"]
+    assert not f.goal_point({**gp("uav1", 0, 0), "position_world_ned_m": {"n": 1}})["accepted"]
+    assert not f.goal_point({**gp("uav1", 0, 0), "schema_version": "0.1.0"})["accepted"]
+    f.command({"cmd": "estop"})
+    assert "緊急停止" in f.goal_point(gp("uav1", 0, 0))["reason"]
+
+
+# ---------- 經過 WebSocket ----------
+def test_link_receives_validated_poses_and_origins(link):
+    assert sorted(link.poses()) == IDS
+    assert link.origins()["uav1"] == (-8.0, -6.0, 0.0)
+    assert all(r.pose.status == "landed" for r in link.poses().values())
+    bad = {"type": "FleetPose", "data": {"drone_id": "uav1", "extra_field": 1}}
+    link._on_message(json.dumps(bad))  # 不符合 §10.2 的不會進到 states()
+    assert link.stats.bad_poses == 1
+
+
+def test_takeoff_then_goals_with_ack_stats(link):
+    fleet = SitlFleet(link)
+    fleet.ensure_airborne(IDS)
+    alts = {s.drone_id: s.alt_m for s in fleet.states()}
+    assert alts == pytest.approx({"uav1": 25.0, "uav2": 30.0, "uav3": 35.0}, abs=0.6)
+    link.send_goals([gp("uav1", 10, 0, d=-25), gp("uav2", 10, 2), gp("uav9", 0, 0)])
+    deadline = time.monotonic() + 3
+    while link.stats.acks < 3 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    s = link.stats.summary()
+    assert (s["acks"], s["rejected"], s["adjusted"]) == (3, 1, 1)  # uav2 推開；uav9 拒絕；uav1 原樣接受
+    assert "推開" in s["last_reason"]["uav2"] and s["ack_rtt_ms_p50"] is not None
+
+
+def test_goal_timeout_marks_failsafe(link):
+    SitlFleet(link).ensure_airborne(IDS)
+    link.send_goals([gp("uav1", -5, -6, d=-25)])
+    time.sleep(1.5)  # 超過 1 s 沒有新的 GoalPoint
+    r = link.poses()["uav1"]
+    assert r.pose.status == "failsafe" and r.failsafe_reason == "goal_timeout"
+    assert link.poses()["uav2"].pose.status == "flying"
+
+
+def test_heartbeat_prevents_agent_timeout(server, link):
+    SitlFleet(link).ensure_airborne(IDS)
+    time.sleep(3.6)  # 超過 A 的 3 s 無訊息懸停門檻；heartbeat 每 0.5 s 一次
+    assert server.fleet.timeout_state is None and link.stats.heartbeats >= 5
+
+
+def test_command_uses_drone_index_and_reports_failure(link):
+    assert link.drone_index("uav3") == 2
+    link.command("hold", drone_id="uav2")
+    with pytest.raises(LinkError, match="未知指令"):
+        link.command("fly_to_moon")
+
+
+def test_connect_failure_is_clear():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]  # 拿一個沒人在聽的埠
+    with pytest.raises(LinkError, match="連不上"):
+        FleetLink(f"ws://127.0.0.1:{port}", connect_timeout_s=1.0).start()
+
+
+def test_demo_engine_runs_on_sitl_backend(link):
+    """Demo 引擎改用 SITL 後端：介面同 FleetSim，引擎與 Agent 不用改。"""
+    from coord_transform.config import load_camera_config, load_error_model
+    from demo.engine import DemoEngine
+    from demo.run import ROOT
+    from llm_agent.commander import Commander
+    from sim2d import RabbitConfig
+
+    fleet = SitlFleet(link)
+    fleet.ensure_airborne(IDS)
+    eng = DemoEngine(load_camera_config(ROOT / "config" / "camera.yaml"), load_error_model(ROOT / "config" / "error_model.yaml"),
+                     Commander(IDS, llm=None, period_s=1.0), rabbit=RabbitConfig(seed=0), fleet=fleet)
+    assert eng.planner.cfg.max_speed_mps == 3.0  # 目標點不要求超過 A 的速度上限
+    for _ in range(25):  # 2.5 秒，照真實時間
+        eng.step()
+        time.sleep(eng.dt)
+    assert link.stats.goals_sent > 0 and link.stats.rejected == 0
+    assert all("上限" not in r for r in link.stats.last_reason.values())
+    assert fleet.min_pair_distance_m >= 5.0
+    # 動作日誌收到 A 的回覆與實際呼叫的 MAVSDK 函式（規格 §10.8）
+    recs = [r for r in eng.ledger.records if r.drone_id]
+    assert recs and all(r.acks > 0 and r.accepted > 0 for r in recs)
+    assert all(r.flight_command["mavsdk"] == "offboard.set_position_ned" for r in recs)
+
+
+def test_demo_run_sitl_connect_failure_exits_without_traceback():
+    """demo.run --fleet sitl 連不上時：一行原因 + 檢查清單，用 SystemExit 結束（不是 traceback）。"""
+    from demo.run import main
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    with pytest.raises(SystemExit) as ei:
+        main(["--fleet", "sitl", "--uri", f"ws://127.0.0.1:{port}", "--headless", "--duration", "1"])
+    msg = str(ei.value)
+    assert "[連線失敗]" in msg and "fake_server" in msg and "SSH" in msg
+
+
+# ---------- §10.8 執行狀態 ----------
+def test_ack_carries_flight_command_in_local_ned(link):
+    SitlFleet(link).ensure_airborne(IDS)
+    link.send_goals([gp("uav2", 10.0, 3.0, d=-30, yaw_rad=0.0)])
+    deadline = time.monotonic() + 3
+    while "uav2" not in link.last_flight_command and time.monotonic() < deadline:
+        time.sleep(0.02)
+    fc = link.last_flight_command["uav2"]
+    assert fc["mavsdk"] == "offboard.set_position_ned" and fc["frame"] == "local_ned"
+    assert (fc["north_m"], fc["east_m"], fc["down_m"]) == pytest.approx((18.0, 3.0, -30.0))  # uav2 出生點 (-8, 0)
+    assert fc["also_called"] == ["offboard.start"]
+
+
+def test_rejected_goal_has_no_flight_command(link):
+    link.send_goals([gp("uav1", 0, 0)])  # 還在地上 → 拒絕
+    deadline = time.monotonic() + 3
+    while "uav1" not in link.last_flight_command and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert link.last_flight_command["uav1"] is None
+
+
+def test_yield_events_track_who_yields_to_whom():
+    lk = FleetLink("ws://unused")
+    start = {"type": "Yield", "schema_version": "0.2.0", "event": "start", "drone_id": "uav3", "yield_to": "uav1",
+             "timestamp_ns": 183880000000, "action_id": "sw7_uav3", "from_alt_m": 30.0, "to_alt_m": 25.0, "direction": "down"}
+    lk._on_message(json.dumps(start))
+    assert lk.yielding() == {"uav3": "uav1"} and lk.stats.yields == 1
+    lk._on_message(json.dumps({**start, "event": "end", "reason": "landed", "to_alt_m": None}))
+    assert lk.yielding() == {} and len(lk.yield_log) == 2
+    lk._on_message(json.dumps({"type": "Yield", "event": "maybe", "drone_id": "uav1"}))  # 格式不對：計數後丟掉
+    assert lk.stats.bad_messages == 1 and len(lk.yield_log) == 2
+
+
+def test_action_results_counted_by_result():
+    lk = FleetLink("ws://unused")
+    ok = {"type": "ActionResult", "action_id": "mv_ok", "drone_id": "uav1", "action": "move_to", "agent_id": "agent_uav1",
+          "role": "tracker", "result": "succeeded", "why": "到達目標 1.5 m 內", "metrics": {"final_err_h_m": 0.4}}
+    lk._on_message(json.dumps(ok))
+    lk._on_message(json.dumps({**ok, "action_id": "mv_far", "result": "failed", "why": "逾時：沒有到達目標"}))
+    assert lk.stats.summary()["action_results"] == {"succeeded": 1, "failed": 1}
+    assert lk.action_log[0].metrics["final_err_h_m"] == 0.4

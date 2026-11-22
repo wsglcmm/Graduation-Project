@@ -1,0 +1,21 @@
+# 誤差模型：各輸入誤差的 1σ，用來計算 TargetWorld 的 uncertainty_m
+#
+# 2026-11-02 用 A 重錄的 5 段 Gazebo 紀錄標定（verify 20 m、hover 20/30/50 m、follow 20 m，約 4.2 萬筆姿態）：
+#   python -m analysis.calibrate_error_model <5 個 session> --estimate-position-lag
+# 這批已設 EKF2_GPS_DELAY = 0、材質已修正，取代 11/01 那批（舊資料重播時仍要加 --position-lead-s 0.095）。
+# 像素誤差：B 11/10 以 VisDrone 微調的 YOLOv8s（best.pt）對同 5 段跑偵測，車 4,429 筆、人 1,764 筆。
+# 選值原則：取「追蹤飛行時」的情況並保守取整，避免 uncertainty_m 低估。
+
+pixel_sigma_px: 6.0         # 實測 5.7 px（center_half_height 參考點；車 u/v 4.1/7.7、人 7.0/2.0），原本假設 2.0
+
+roll_pitch_sigma_deg: 0.1   # 實測：懸停 0.014°；跟車 0.03–0.04°（11/01 舊資料跟車轉彎曾到 0.25°，取 0.1 保守）
+
+yaw_sigma_deg: 4.3          # 實測 RMS（偏差 +4.0° 加抖動 1.6°）。原因（A 查明）：PX4 用地磁模型的磁偏角 +3.41°，
+                            # Gazebo 磁場是 −2.56°（固定差 6.0°），再加上磁力計自動校正的偏移（每次執行會變）。
+                            # 地面 +5.0 ~ +5.5°、懸停 +3.6 ~ +4.9°，要水平直線飛約 15 s 才收斂。
+                            # 偏差是系統性的，只填標準差（1.6°）會低估；A 選定修正方式並錄驗證資料後再下修
+
+altitude_sigma_m: 0.05      # 實測：0.013–0.023 m（各段），合併 0.038 m
+
+horizontal_position_sigma_m: 0.1  # 實測：懸停約 0.02 m；跟車 n / e 約 0.02 / 0.08 m（RMS），取 0.1 保守。
+                                  # EKF2_GPS_DELAY = 0 之後位置超前已消失（follow20m 最佳時間差 +10 ms，補償無改善）
