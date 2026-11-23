@@ -66,6 +66,9 @@ class FormationPlanner:
         self._hold_anchor: Dict[str, tuple] = {}  # 各機 Agent 選 hold 時的懸停位置
         self.last_adjustments: List[Adjustment] = []  # 最近一次去衝突改了哪些目標點（之後進動作日誌）
         self.adjustment_count = 0  # 累計被去衝突修改的目標點數
+        # 最近一次 goal_points 的搜尋圈：{"center": (n, e), "radius_m": r, "drones": {…}}，沒有在搜尋時為 None。
+        # 動作日誌用它判定搜尋動作「有沒有飛到搜尋圈上」（搜尋圈上的目標點本身會繞得比無人機快，追不到）。
+        self.last_search: Optional[dict] = None
 
     @property
     def capture_zone(self) -> Optional[CaptureZone]:
@@ -102,6 +105,7 @@ class FormationPlanner:
                     actions: Optional[Dict[str, str]] = None) -> List[dict]:
         """actions：各機 Agent 的動作（多 Agent 模式，drone_id → 動作）。None = 單一指揮官，角色內建的規則決定怎麼做。"""
         actions = actions or {}
+        self.last_search = None
         tgt = next((t for t in targets if t["target_id"] == plan.target_id), None)
         if tgt is not None and tgt["status"] != "lost":
             p = tgt["position_world_ned_m"]
@@ -168,6 +172,9 @@ class FormationPlanner:
         if plan.mode == "search" or role == "searcher" or tgt is None or tgt["status"] == "lost":
             cn, ce = self._search_center or self.cfg.initial_search_center
             rr = self._search_radius(r, t_ns)
+            if self.last_search is None:
+                self.last_search = {"center": (cn, ce), "radius_m": rr, "drones": set()}
+            self.last_search["drones"].add(d.drone_id)
             if self.cfg.search_speed_fraction > 0:
                 ang = self._search_phase + 2 * math.pi * k / count
             else:  # 原本的行為：固定角速度 × 絕對時間（預設，保持和之前的實驗結果完全一致）

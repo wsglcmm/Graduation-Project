@@ -205,3 +205,41 @@ def test_ledger_per_drone_actions():
                                       None, None, error="capturer 不能用 push"), 1.0)
     assert lg.records[-1].result == "rejected" and lg.active[cap.drone_id].action == "engage"
     team.close()
+
+
+def _search_step(lg, t, ring_r, uav1_pos, goal_ne=(0.0, 40.0)):
+    """搜尋：目標點在圈上繞（這裡固定一點即可），判定只看離搜尋圈多遠。"""
+    search = {"center": (0.0, 0.0), "radius_m": ring_r, "drones": {"uav1"}}
+    d = drone("uav1", *uav1_pos)
+    lg.on_goals([goal("uav1", *goal_ne)], drones=[d], t_s=t, search=search)
+    lg.on_poses([d], t)
+
+
+def test_search_is_judged_by_reaching_the_ring_not_the_orbit_point():
+    """11/23 A 的真實 SITL：搜尋圈上的目標點移動得比無人機快，追不到 → 改判「有沒有飛到搜尋圈上」。"""
+    lg = ActionLedger()
+    lg.on_event(event("p1", mode="search", roles=("searcher", "searcher"), target_id=None), 0.0)
+    for k in range(31):  # 0–3 s：無人機一直在半徑 20 m 的圈上（離繞圈目標點 40 m 以上也沒關係）
+        _search_step(lg, k * 0.1, 20.0, (-20.0, 0.0))
+    rec = lg.records[0]
+    assert rec.result == "succeeded" and "搜尋圈" in rec.why and rec.search_ring == [0.0, 0.0, 20.0]
+
+
+def test_search_fails_when_drone_never_reaches_the_ring_and_deadline_uses_ring_distance():
+    lg = ActionLedger(VerifyConfig(max_speed_mps=5.0))
+    lg.on_event(event("p1", mode="search", roles=("searcher", "searcher"), target_id=None), 0.0)
+    _search_step(lg, 0.0, 20.0, (0.0, 0.0))  # 在圓心：離圈 20 m → 期限 max(8, 20/5×1.5+5) = 11 s
+    rec = lg.records[0]
+    assert rec.deadline_s == pytest.approx(11.0)
+    for k in range(1, 121):
+        _search_step(lg, k * 0.1, 20.0, (0.0, 0.0))
+    assert rec.result == "failed" and "搜尋圈" in rec.why
+
+
+def test_search_goal_speed_is_ring_growth_rate():
+    """搜尋圈每秒擴大 2 m：容許值 = 1.5 + 2 × 1 s。"""
+    lg = ActionLedger()
+    lg.on_event(event("p1", mode="search", roles=("searcher", "searcher"), target_id=None), 0.0)
+    for k in range(20):
+        _search_step(lg, k * 0.1, 20.0 + 0.2 * k, (0.0, 0.0))
+    assert lg.tolerance_m(lg.records[0]) == pytest.approx(3.5, abs=0.2)

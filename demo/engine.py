@@ -162,7 +162,7 @@ class DemoEngine:
             self.goals = self.planner.goal_points(self.commander.current, self.commander.current_id, drones, targets,
                                                   self.t_ns, actions)
             self.sim.apply_goals(self.goals, self.t_ns)
-            self.ledger.on_goals(self.goals, self.planner.last_adjustments, drones, t_s)
+            self.ledger.on_goals(self.goals, self.planner.last_adjustments, drones, t_s, search=self.planner.last_search)
         self.sim.step(self.dt, self.t_ns)
         drain = getattr(self.sim, "drain_acks", None)  # 只有接 A 的 SITL 才有回覆
         if drain is not None:

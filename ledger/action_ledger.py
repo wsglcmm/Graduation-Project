@@ -19,6 +19,10 @@
                         只是跟在後面」誤判成失敗（實測：抓拍機已經抓拍成功，動作卻判未達成）；
                         但容許值放太寬，驗證就永遠通過、沒有意義，所以加上「連續 2 s」並把落後時間定在 1 s。
                         到達後繼續統計追蹤誤差（平均、p95），對應 A 的 follow / encircle 結算方式
+                        搜尋（繞圈）例外：搜尋圈上的目標點是「掃描用的參考點」，角速度固定、半徑還會擴大，
+                        移動得比無人機快，本來就追不到（11/23 A 的真實 SITL：通過率 50% 裡 2/3 的 failed 都是它）。
+                        所以搜尋改判「有沒有飛到搜尋圈上」：誤差 = |到圓心距離 − 半徑|，容許值同目標點在動
+                        （速度 = 半徑擴大的速度），期限也照到搜尋圈的距離算
 
 另外記錄「指令一致率」：每一步，無人機是不是正朝著目前的目標點飛（速度方向和「到目標點的方向」
 夾角 < 45°，或已經在容許值內）。兩層分開看才不會混在一起：
@@ -91,6 +95,7 @@ class ActionRecord:
     goals_sent: int = 0
     last_goal_ned: Optional[List[float]] = None
     goal_speed_mps: float = 0.0  # 目標點移動速度（平滑後），決定到達的容許值
+    search_ring: Optional[List[float]] = None  # 搜尋時：[圓心 n, 圓心 e, 半徑]，到達改判「飛到搜尋圈上」
     c_adjustments: int = 0
     # 3. A 的回覆
     acks: int = 0
@@ -113,6 +118,7 @@ class ActionRecord:
     _errs: List[float] = field(default_factory=list, repr=False)
     _first_reject_s: Optional[float] = field(default=None, repr=False)
     _last_goal_t: Optional[float] = field(default=None, repr=False)
+    _ring_t: Optional[float] = field(default=None, repr=False)
     _within_since: Optional[float] = field(default=None, repr=False)
 
     @property
@@ -223,14 +229,20 @@ class ActionLedger:
             self._by_plan[(ctx["plan_id"], dev.drone_id)] = rec
 
     # ---------- 2. 對應飛控指令 ----------
-    def on_goals(self, goals: Sequence[dict], adjustments: Iterable = (), drones: Sequence = (), t_s: Optional[float] = None) -> None:
-        """這一步送出的 GoalPoint（規格 §10.6）與 C 去衝突的修改紀錄（planner.deconflict.Adjustment）。"""
+    def on_goals(self, goals: Sequence[dict], adjustments: Iterable = (), drones: Sequence = (), t_s: Optional[float] = None,
+                 search: Optional[dict] = None) -> None:
+        """這一步送出的 GoalPoint（規格 §10.6）與 C 去衝突的修改紀錄（planner.deconflict.Adjustment）。
+        search：planner.FormationPlanner.last_search（搜尋圈與正在搜尋的無人機），None = 沒有在搜尋。"""
         pos = {d.drone_id: d for d in drones}
         for g in goals:
             rec = self._by_plan.get((g.get("plan_id"), g["drone_id"]))
             if rec is None or rec.t_end_s is not None:
                 continue
             p = g["position_world_ned_m"]
+            if search is not None and g["drone_id"] in search["drones"]:
+                self._on_search_goal(rec, g, search, pos.get(g["drone_id"]), t_s)
+                continue
+            rec.search_ring = None
             if rec.last_goal_ned is not None and t_s is not None and rec._last_goal_t is not None and t_s > rec._last_goal_t:
                 step = math.hypot(p["n"] - rec.last_goal_ned[0], p["e"] - rec.last_goal_ned[1])
                 if step <= self.cfg.jump_m:  # 跳動（讓路橫移、伏擊 → 迎上去）不是「目標點在動」，不算進速度
@@ -248,6 +260,35 @@ class ActionLedger:
             rec = self.active.get(adj.drone_id)
             if rec is not None:
                 rec.c_adjustments += 1
+
+    def _on_search_goal(self, rec: ActionRecord, g: dict, search: dict, d, t_s: Optional[float]) -> None:
+        """搜尋：記下搜尋圈；目標點速度改用「半徑擴大的速度」（圓心換了就重新開始算）。"""
+        p = g["position_world_ned_m"]
+        (cn, ce), r = search["center"], search["radius_m"]
+        old = rec.search_ring
+        if old is not None and t_s is not None and rec._ring_t is not None and t_s > rec._ring_t:
+            if math.hypot(cn - old[0], ce - old[1]) <= self.cfg.jump_m:
+                v = min(abs(r - old[2]) / (t_s - rec._ring_t), self.cfg.max_speed_mps)
+                rec.goal_speed_mps = round(0.7 * rec.goal_speed_mps + 0.3 * v, 3)
+        elif old is None:
+            rec.goal_speed_mps = 0.0
+        rec.search_ring = [round(cn, 2), round(ce, 2), round(r, 2)]
+        rec._ring_t = t_s
+        rec._last_goal_t = None  # 之後換回一般目標點時，速度重新估
+        rec.goals_sent += 1
+        rec.last_goal_ned = [round(p["n"], 2), round(p["e"], 2), round(p["d"], 2)]
+        if rec.deadline_s is None and d is not None:
+            c = self.cfg
+            dist = abs(math.hypot(d.n - cn, d.e - ce) - r)
+            rec.deadline_s = rec.t_start_s + max(c.min_deadline_s, dist / c.max_speed_mps * c.deadline_factor + c.deadline_margin_s)
+
+    def horizontal_error_m(self, rec: ActionRecord, d) -> float:
+        """到達判定用的水平誤差（m）：一般是到目標點的距離；搜尋時是離搜尋圈多遠。"""
+        if rec.search_ring is not None:
+            cn, ce, r = rec.search_ring
+            return abs(math.hypot(d.n - cn, d.e - ce) - r)
+        gn, ge, _ = rec.last_goal_ned
+        return math.hypot(d.n - gn, d.e - ge)
 
     # ---------- 3. A 的回覆 ----------
     def on_acks(self, acks: Iterable, t_s: float) -> None:
@@ -280,9 +321,9 @@ class ActionLedger:
             if rec is None or rec.last_goal_ned is None:
                 continue
             gn, ge, gd = rec.last_goal_ned
-            eh, ev = math.hypot(d.n - gn, d.e - ge), abs(-d.alt_m - gd)
+            eh, ev = self.horizontal_error_m(rec, d), abs(-d.alt_m - gd)
             rec.final_err_h_m, rec.final_err_v_m = round(eh, 2), round(ev, 2)
-            self._judge_consistency(rec, d, gn, ge, eh, t_s)
+            self._judge_consistency(rec, d, gn, ge, math.hypot(d.n - gn, d.e - ge), t_s)
             if rec.reached_at_s is not None:
                 rec._errs.append(eh)
             if rec.result is not None:
@@ -296,12 +337,16 @@ class ActionLedger:
                 rec._within_since = None
             if inside and (not moving or t_s - rec._within_since >= c.hold_s - 1e-9):
                 rec.reached_at_s, rec.time_to_reach_s = t_s, round(t_s - rec.t_start_s, 2)
-                kind = f"連續 {c.hold_s:g} s 跟上移動中的目標點" if moving else "到達目標點"
+                if rec.search_ring is not None:
+                    kind = f"飛到搜尋圈上（連續 {c.hold_s:g} s）" if moving else "飛到搜尋圈上"
+                else:
+                    kind = f"連續 {c.hold_s:g} s 跟上移動中的目標點" if moving else "到達目標點"
                 self._resolve(rec, "succeeded", f"{kind} {tol:.1f} m 內（{rec.time_to_reach_s:.1f} s）")
             elif rec._first_reject_s is not None and rec.accepted == 0 and t_s - rec._first_reject_s >= c.reject_after_s:
                 self._resolve(rec, "rejected", f"A 拒絕：{rec.last_ack_reason}")
             elif rec.deadline_s is not None and t_s > rec.deadline_s:
-                self._resolve(rec, "failed", f"逾時：期限內沒有到達目標點（還差 {eh:.1f} m）")
+                where = "搜尋圈" if rec.search_ring is not None else "目標點"
+                self._resolve(rec, "failed", f"逾時：期限內沒有到達{where}（還差 {eh:.1f} m）")
 
     def _judge_consistency(self, rec: ActionRecord, d, gn: float, ge: float, eh: float, t_s: float) -> None:
         prev = self._prev_pos.get(d.drone_id)

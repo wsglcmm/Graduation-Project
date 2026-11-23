@@ -51,6 +51,11 @@ def test_search_orbits_last_known_position_with_phase_offsets():
     for n, e in pts:
         assert math.hypot(n - 50, e - 10) == pytest.approx(20.0)
     assert len({(round(n, 3), round(e, 3)) for n, e in pts}) == 3  # 三架相位錯開
+    # 動作日誌用：搜尋圈（圓心、半徑）與正在搜尋的無人機
+    assert fp.last_search["center"] == (50, 10) and fp.last_search["radius_m"] == pytest.approx(20.0)
+    assert fp.last_search["drones"] == set(IDS)
+    fp.goal_points(plan(), "p", DRONES, [target(n=50, e=10, vn=0)], 0)
+    assert fp.last_search is None  # 不在搜尋
 
 
 def test_return_home_uses_home_positions():
