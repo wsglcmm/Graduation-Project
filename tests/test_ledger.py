@@ -49,7 +49,8 @@ def test_same_role_continues_one_action_role_change_overrides():
     lg.on_event(event("p2"), 2.0)  # 角色沒變：同一筆
     assert len(lg.records) == 2 and lg.active["uav1"].plan_ids == ["p1", "p2"]
     lg.on_event(event("p3", roles=("blocker_left", "chaser")), 4.0)  # 兩架互換
-    assert [r.result for r in lg.records[:2]] == ["overridden", "overridden"]
+    assert [r.result for r in lg.records[:2]] == ["cancelled", "cancelled"]  # 同 A 的 ActionResult：被取代 = cancelled
+    assert all(r.superseded and r.status_zh == "已改派" for r in lg.records[:2])
     assert lg.active["uav1"].role == "blocker_left" and len(lg.records) == 4
 
 
@@ -58,6 +59,7 @@ def test_operator_hold_cancels_running_actions():
     lg.on_event(event("p1"), 0.0)
     lg.on_event(event("p2", mode="hold", roles=("idle", "idle"), trigger="operator", target_id=None), 3.0)
     assert [r.result for r in lg.records[:2]] == ["cancelled", "cancelled"]
+    assert not any(r.superseded for r in lg.records[:2]) and lg.records[0].status_zh == "已取消"
 
 
 def test_static_goal_reached_like_a_move_to():
@@ -193,11 +195,11 @@ def test_ledger_per_drone_actions():
     assert {r.agent_id for r in lg.records} == {"agent_uav1", "agent_uav2", "agent_uav3"}
     cap = next(r for r in lg.records if r.role == "capturer")
     assert cap.action == "ambush" and cap.plan_ids
-    # 抓拍 Agent 改成 engage：舊動作 overridden，開新動作
+    # 抓拍 Agent 改成 engage：舊動作 cancelled（被取代），開新動作
     evs = team.tick(int(0.5 * S), DRONES, [target(n=20.0)], zone=ZONE)
     for dev in team.new_drone_events:
         lg.on_drone_event(dev, 0.5)
-    assert cap.result == "overridden" and "engage" in cap.why
+    assert cap.result == "cancelled" and cap.superseded and "engage" in cap.why
     assert lg.active[cap.drone_id].action == "engage"
     # 不合法的各機決策：記 rejected，不影響目前動作
     from llm_agent.drone_agent import DroneAgentEvent

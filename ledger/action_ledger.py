@@ -29,12 +29,15 @@
     指令一致率高、到達失敗   → 無人機有照指令飛，是目標點本身追不上（規劃的問題，例如目標點移動得和無人機一樣快）
     指令一致率低             → 無人機沒有照指令飛（被 A 修改、讓路、安全層介入，或飛控本身的問題）
 
-結果使用和 A 的 ActionResult 相同的詞彙（規格 §10.8），兩邊的「動作驗證通過率」才可以比較：
+結果使用和 A 的 ActionResult 相同的詞彙與意思（規格 §10.8、§10.11；11/23 依 A 的定義對齊），
+兩邊的「動作驗證通過率」才可以比較：
     succeeded   在期限內到達目標點
     failed      超過期限還沒到達
     rejected    白名單驗證失敗（C 不送出），或 A 拒絕了所有目標點
-    overridden  還沒驗證完就被新的計畫換掉（Agent 重新分派）
-    cancelled   被操作員指令中斷（hold / return_home），或計畫在套用前就被取代
+    cancelled   還沒驗證完就被新的動作 / 計畫取代（superseded = True，面板顯示「已改派」）、
+                被操作員指令中斷（hold / return_home）、計畫在套用前就被取代，或 Demo 結束時仍在進行
+    overridden  A 的安全層介入接手（C 自己不產生，保留給 A 的 ActionResult）
+cancelled / overridden 都不列入通過率：還沒有機會驗證完。
 
 期限 = max(min_deadline_s, 初始距離 / 速度上限 × deadline_factor + deadline_margin_s)。
 座標：world_ned，m；時間：Demo 引擎的時鐘（s）。
@@ -47,7 +50,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
 RESULTS = ("succeeded", "failed", "rejected", "overridden", "cancelled")
-RESULT_ZH = {"succeeded": "通過", "failed": "未達成", "rejected": "被拒絕", "overridden": "已改派", "cancelled": "已取消",
+RESULT_ZH = {"succeeded": "通過", "failed": "未達成", "rejected": "被拒絕", "overridden": "A 安全層接手", "cancelled": "已取消",
              None: "進行中"}
 OPERATOR_STOP_MODES = ("hold", "return_home")
 
@@ -115,6 +118,7 @@ class ActionRecord:
     judged_steps: int = 0  # 可以判斷的步數
     result: Optional[str] = None
     why: Optional[str] = None
+    superseded: bool = False  # cancelled 的原因是被新的動作 / 計畫取代（Agent 改派）
     _errs: List[float] = field(default_factory=list, repr=False)
     _first_reject_s: Optional[float] = field(default=None, repr=False)
     _last_goal_t: Optional[float] = field(default=None, repr=False)
@@ -131,6 +135,8 @@ class ActionRecord:
         """面板用的狀態：通過 / 被 A 修改 / 被拒絕 / 未達成 / 已改派 / 已取消 / 進行中。"""
         if self.result == "succeeded" and self.adjusted:
             return "被 A 修改"
+        if self.result == "cancelled" and self.superseded:
+            return "已改派"
         return RESULT_ZH[self.result]
 
     def to_dict(self) -> dict:
@@ -179,8 +185,8 @@ class ActionLedger:
                 self._by_plan[(ev.plan_id, did)] = cur
                 continue
             if cur is not None:
-                self._close(cur, t_s, "cancelled" if stop else "overridden",
-                            "操作員指令中斷" if stop else f"Agent 改派為 {plan['mode']} / {a['role']}")
+                self._close(cur, t_s, "cancelled", "操作員指令中斷" if stop else f"Agent 改派為 {plan['mode']} / {a['role']}",
+                            superseded=not stop)
             rec = ActionRecord(self._next_id(did), did, a["role"], plan["mode"], plan.get("target_id"), [ev.plan_id],
                                ev.planner, ev.trigger, ev.operator_command, plan["reason"], ev.latency_ms, ev.model, True,
                                None, t_s, agent_id="coordinator")
@@ -201,8 +207,8 @@ class ActionLedger:
                 cur.plan_ids.append(ev.plan_id)
                 self._by_plan[(ev.plan_id, did)] = cur
             elif cur is not None:
-                self._close(cur, t_s, "cancelled" if stop else "overridden",
-                            "操作員指令中斷" if stop else f"協調 Agent 改派為 {plan['mode']} / {a['role']}")
+                self._close(cur, t_s, "cancelled",
+                            "操作員指令中斷" if stop else f"協調 Agent 改派為 {plan['mode']} / {a['role']}", superseded=not stop)
 
     def on_drone_event(self, dev, t_s: float) -> None:
         """各機 Agent 的決策（llm_agent.drone_agent.DroneAgentEvent）。不合法 → rejected；動作改變 → 開新動作。"""
@@ -218,7 +224,7 @@ class ActionLedger:
         if cur is not None and (cur.mode, cur.role, cur.target_id, cur.action) == key:
             return
         if cur is not None:
-            self._close(cur, t_s, "overridden", f"{dev.agent_id} 改為 {dev.action}")
+            self._close(cur, t_s, "cancelled", f"{dev.agent_id} 改為 {dev.action}", superseded=True)
         rec = ActionRecord(self._next_id(dev.drone_id), dev.drone_id, dev.role, dev.mode, ctx.get("target_id"),
                            [ctx["plan_id"]] if ctx.get("plan_id") else [], dev.planner, dev.trigger,
                            ctx.get("operator_command"), dev.reason, dev.latency_ms, dev.model, True, None, t_s,
@@ -388,7 +394,7 @@ class ActionLedger:
         return {
             "actions": len(self.records),
             "by_result": counts,
-            # 動作驗證通過率：有被判定的動作中，通過的比例（已改派 / 已取消的不列入，因為還沒機會驗證完）
+            # 動作驗證通過率：有被判定的動作中，通過的比例（cancelled / overridden 不列入，因為還沒機會驗證完）
             "action_pass_rate": counts["succeeded"] / judged if judged else None,
             "adjusted_by_a": sum(1 for x in self.records if x.adjusted),
             "adjusted_by_c": sum(1 for x in self.records if x.c_adjustments),
@@ -406,7 +412,7 @@ class ActionLedger:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
         cols = ["action_id", "t_start_s", "t_end_s", "drone_id", "agent_id", "role", "action", "mode", "target_id", "planner", "trigger",
                 "operator_command", "valid", "goals_sent", "c_adjustments", "acks", "accepted", "adjusted", "rejected",
-                "time_to_reach_s", "track_err_mean_m", "track_err_p95_m", "command_consistency", "result", "status_zh",
+                "time_to_reach_s", "track_err_mean_m", "track_err_p95_m", "command_consistency", "result", "superseded", "status_zh",
                 "why", "reason"]
         with open(out_dir / "actions.csv", "w", encoding="utf-8-sig", newline="") as f:
             w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
@@ -425,13 +431,13 @@ class ActionLedger:
         rec.result, rec.why = result, why
         self.newly_resolved.append(rec)
 
-    def _close(self, rec: ActionRecord, t_s: float, result: str, why: str) -> None:
+    def _close(self, rec: ActionRecord, t_s: float, result: str, why: str, superseded: bool = False) -> None:
         rec.t_end_s = t_s
         if rec._errs:
             e = sorted(rec._errs)
             rec.track_err_mean_m = round(sum(e) / len(e), 2)
             rec.track_err_p95_m = round(e[min(len(e) - 1, int(0.95 * len(e)))], 2)
         if rec.result is None:
-            rec.result, rec.why = result, why
+            rec.result, rec.why, rec.superseded = result, why, superseded
         if self.active.get(rec.drone_id) is rec:
             del self.active[rec.drone_id]
