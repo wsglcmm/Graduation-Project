@@ -77,3 +77,11 @@ def test_search_speed_fraction_limits_goal_speed():
         pts.append((g["n"], g["e"]))
     speed = sum(math.dist(a, b) for a, b in zip(pts, pts[1:])) / 1.0
     assert speed == pytest.approx(4.0, rel=0.05)  # 0.8 × 5 m/s；不限制時是 0.25 rad/s × 40 m = 10 m/s
+
+
+def test_overwatch_stays_on_own_altitude_layer():
+    """A 11/23：A 會把高度拉回高度層（上限 40 m），overwatch 不再加高。"""
+    ow = plan(assignments=[{"drone_id": "uav1", "role": "overwatch"}, {"drone_id": "uav2", "role": "chaser"},
+                           {"drone_id": "uav3", "role": "blocker_left"}])
+    gps = FormationPlanner().goal_points(ow, "p", DRONES, [target()], 0)
+    assert gps[0]["position_world_ned_m"]["d"] == -25.0

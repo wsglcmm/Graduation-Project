@@ -8,7 +8,7 @@ LLM 只說「uav2 當左翼攔截」，「左翼攔截要站在哪個座標」�
     chaser          正後方（180°）
     blocker_left    左前方（-60°）
     blocker_right   右前方（+60°）    → 三架平均分佈在 120° 間隔上，形成包圍
-    overwatch       目標正上方，高度 + overwatch_extra_alt_m
+    overwatch       目標正上方，維持自己的高度層（見 overwatch_extra_alt_m）
     searcher        以最後已知位置為中心繞圈，多架時相位錯開
     idle            原地不動
     herder / capturer / blocker   捕捉策略（mode = capture）的驅趕 / 抓拍 / 封鎖，幾何見 planner/capture.py
@@ -35,7 +35,9 @@ class FormationConfig:
     default_altitude_m: float = 30.0
     lead_s: float = 1.0  # 攔截提前量
     track_extra_radius_factor: float = 1.6  # track 模式隊形放大，先保持距離跟上
-    overwatch_extra_alt_m: float = 10.0
+    # 原本 10 m；A 11/23：A 的安全層會把高度拉回該架的高度層（上限 40 m），uav3 35 + 10 = 45 m 也超過上限，
+    # 送了也不會照做，只會讓動作日誌的高度差判未達成。所以預設 0：維持自己的高度層。
+    overwatch_extra_alt_m: float = 0.0
     search_angular_speed_rps: float = 0.25
     search_growth_mps: float = 2.0  # 搜尋圈半徑每秒擴大多少（找不到就越找越大）
     search_max_radius_m: float = 60.0
