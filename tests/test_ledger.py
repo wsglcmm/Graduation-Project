@@ -245,3 +245,14 @@ def test_search_goal_speed_is_ring_growth_rate():
     for k in range(20):
         _search_step(lg, k * 0.1, 20.0 + 0.2 * k, (0.0, 0.0))
     assert lg.tolerance_m(lg.records[0]) == pytest.approx(3.5, abs=0.2)
+
+
+def test_goal_points_are_tagged_with_action_agent_and_role():
+    """11/23 A：GoalPoint 帶 action_id / agent_id / role，A 的紀錄才能對回各機 Agent 的動作。"""
+    lg = ActionLedger()
+    lg.on_event(event("p1"), 0.0)
+    gs = [goal("uav1", 1.0, 2.0), goal("uav2", 3.0, 4.0), goal("uav9", 0.0, 0.0)]
+    lg.tag_goals(gs)
+    assert gs[0]["action_id"] == lg.active["uav1"].action_id and gs[0]["agent_id"] == "coordinator" and gs[0]["role"] == "chaser"
+    assert gs[1]["role"] == "blocker_left"
+    assert "action_id" not in gs[2]  # 沒有進行中的動作就不加

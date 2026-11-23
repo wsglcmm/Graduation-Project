@@ -235,6 +235,21 @@ class ActionLedger:
             self._by_plan[(ctx["plan_id"], dev.drone_id)] = rec
 
     # ---------- 2. 對應飛控指令 ----------
+    def tag_goals(self, goals: Sequence[dict]) -> None:
+        """送出前在 GoalPoint 加上 action_id、agent_id、role（選填欄位，11/23 A 要求）。
+
+        A 的紀錄就能用 action_id 對回 C 的動作日誌：「哪一架的哪個 Agent、什麼角色的動作 → A 實際呼叫的 MAVSDK 函式」，
+        口試時有兩份獨立的紀錄可以互相印證。該架目前沒有進行中的動作（例如剛被改派、Agent 還沒決定）就不加。"""
+        for g in goals:
+            rec = self.active.get(g["drone_id"])
+            if rec is None:
+                continue
+            g["action_id"] = rec.action_id
+            if rec.agent_id is not None:
+                g["agent_id"] = rec.agent_id
+            if rec.role is not None:
+                g["role"] = rec.role
+
     def on_goals(self, goals: Sequence[dict], adjustments: Iterable = (), drones: Sequence = (), t_s: Optional[float] = None,
                  search: Optional[dict] = None) -> None:
         """這一步送出的 GoalPoint（規格 §10.6）與 C 去衝突的修改紀錄（planner.deconflict.Adjustment）。

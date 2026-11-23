@@ -161,6 +161,7 @@ class DemoEngine:
             actions = self.commander.actions() if self.multi else None
             self.goals = self.planner.goal_points(self.commander.current, self.commander.current_id, drones, targets,
                                                   self.t_ns, actions)
+            self.ledger.tag_goals(self.goals)  # GoalPoint 帶 action_id / agent_id / role，A 的紀錄可以對回動作日誌
             self.sim.apply_goals(self.goals, self.t_ns)
             self.ledger.on_goals(self.goals, self.planner.last_adjustments, drones, t_s, search=self.planner.last_search)
         self.sim.step(self.dt, self.t_ns)
