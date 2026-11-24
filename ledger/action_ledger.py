@@ -168,6 +168,7 @@ class ActionLedger:
         self.records: List[ActionRecord] = []
         self.active: Dict[str, ActionRecord] = {}  # drone_id → 進行中的動作
         self._by_plan: Dict[tuple, ActionRecord] = {}  # (plan_id, drone_id) → 動作（遲到的 ack 用）
+        self._by_action: Dict[str, ActionRecord] = {}  # action_id → 動作（ack 帶 action_id 時用）
         self._n = 0
         self.newly_resolved: List[ActionRecord] = []  # 最近一次 update 新產生結果的動作（面板顯示用）
         self._prev_pos: Dict[str, tuple] = {}  # drone_id → (n, e, t_s)，估速度方向用
@@ -335,7 +336,10 @@ class ActionLedger:
     def on_acks(self, acks: Iterable, t_s: float) -> None:
         """fleet_link.GoalPointAck（含選填的 flight_command，規格 §10.8）。"""
         for a in acks:
-            rec = self._by_plan.get((a.plan_id, a.drone_id)) or self.active.get(a.drone_id)
+            # 優先用 ack 放回的 action_id：改派那一瞬間，同一個 plan_id 底下已經開了新動作，
+            # 但這則 ack 回的是上一個動作送出的 GoalPoint（A 11/24 發現 seed 1 的 uav2-0010 多算了 1 則）
+            rec = (self._by_action.get(a.action_id) if a.action_id else None) \
+                or self._by_plan.get((a.plan_id, a.drone_id)) or self.active.get(a.drone_id)
             if rec is None:
                 continue
             rec.acks += 1
@@ -462,6 +466,7 @@ class ActionLedger:
 
     def _add(self, rec: ActionRecord) -> None:
         self.records.append(rec)
+        self._by_action[rec.action_id] = rec
 
     def _resolve(self, rec: ActionRecord, result: str, why: str) -> None:
         rec.result, rec.why = result, why

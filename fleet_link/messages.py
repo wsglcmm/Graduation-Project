@@ -54,6 +54,7 @@ class GoalPointAck(BaseModel):
     reason: Optional[str] = None
     applied_position_world_ned_m: Optional[Dict[str, float]] = None
     latency_ms: Optional[float] = None
+    action_id: Optional[str] = None  # 選填：A 原樣放回 GoalPoint 的 action_id（規格 v0.2.6 §10.6）
     flight_command: Optional[Dict[str, Any]] = None  # §10.8(a)：實際呼叫的 MAVSDK 函式；被拒絕時為 None
 
 

@@ -273,3 +273,19 @@ def test_invalid_llm_output_is_still_rejected():
     lg = ActionLedger()
     lg.on_event(event(valid=False, plan_id=None, error="target_id 9 不存在"), 1.0)
     assert lg.records[0].result == "rejected" and not lg.records[0].api_error
+
+
+def test_ack_is_attributed_by_action_id_when_present():
+    """A 11/24：改派那一瞬間 ack 回的是上一個動作的 GoalPoint；ack 帶 action_id 時照它歸屬，不照 plan_id。"""
+    lg = ActionLedger()
+    lg.on_event(event("p1"), 0.0)
+    old = lg.active["uav1"]
+    gs = [goal("uav1", 1.0, 2.0)]
+    lg.tag_goals(gs)
+    lg.on_event(event("p1b", roles=("blocker_left", "chaser")), 0.5)  # 改派：開新動作
+    new = lg.active["uav1"]
+    lg._by_plan[("p1", "uav1")] = new  # 模擬同一個 plan_id 底下已經是新動作
+    lg.on_acks([GoalPointAck(drone_id="uav1", plan_id="p1", accepted=True, action_id=gs[0]["action_id"])], 0.6)
+    assert old.acks == 1 and new.acks == 0
+    lg.on_acks([GoalPointAck(drone_id="uav1", plan_id="p1", accepted=True)], 0.7)  # 沒帶 action_id：照舊用 plan_id
+    assert new.acks == 1

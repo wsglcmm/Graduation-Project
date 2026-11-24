@@ -80,6 +80,8 @@ class FakeFleet:
         ack = {"schema_version": "0.2.0", "plan_id": g.get("plan_id"), "drone_id": g.get("drone_id"),
                "timestamp_ns": g.get("timestamp_ns"), "accepted": False, "adjusted": False, "reason": None,
                "applied_position_world_ned_m": None, "flight_command": None}
+        if g.get("action_id") is not None:  # 同 A（規格 v0.2.6 §10.6）：原樣放回 action_id
+            ack["action_id"] = g["action_id"]
         d = self.by_id.get(g.get("drone_id"))
         p = g.get("position_world_ned_m") or {}
         vals = [p.get(k) for k in ("n", "e", "d")]
