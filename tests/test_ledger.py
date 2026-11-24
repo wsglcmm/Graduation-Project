@@ -256,3 +256,20 @@ def test_goal_points_are_tagged_with_action_agent_and_role():
     assert gs[0]["action_id"] == lg.active["uav1"].action_id and gs[0]["agent_id"] == "coordinator" and gs[0]["role"] == "chaser"
     assert gs[1]["role"] == "blocker_left"
     assert "action_id" not in gs[2]  # 沒有進行中的動作就不加
+
+
+@pytest.mark.parametrize("err", ["ServerError: 503 UNAVAILABLE. high demand", "429 RESOURCE_EXHAUSTED", "LLM 逾時（8 s）"])
+def test_llm_api_failure_is_not_counted_as_rejected(err):
+    """A 11/24：API 錯誤（503 / 429 / 逾時）和「LLM 回了不合法的動作」分開記，前者不列入通過率。"""
+    lg = ActionLedger()
+    lg.on_event(event(valid=False, plan_id=None, error=err), 1.0)
+    (r,) = lg.records
+    assert r.result == "cancelled" and r.api_error and r.status_zh == "LLM 無回應" and "API" in r.why
+    s = lg.summary()
+    assert s["by_result"]["api_error"] == 1 and s["by_result"]["rejected"] == 0 and s["action_pass_rate"] is None
+
+
+def test_invalid_llm_output_is_still_rejected():
+    lg = ActionLedger()
+    lg.on_event(event(valid=False, plan_id=None, error="target_id 9 不存在"), 1.0)
+    assert lg.records[0].result == "rejected" and not lg.records[0].api_error

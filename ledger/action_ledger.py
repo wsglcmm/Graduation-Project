@@ -49,6 +49,17 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
+# LLM 呼叫本身失敗（Google 端 429 / 503 / 504、逾時、連線錯誤）：模型根本沒有回應，沒有「動作」可以驗證。
+# 和「LLM 回了不合法的動作」（白名單驗證失敗 = rejected）分開記，不列入通過率（A 11/24：LLM 版通過率被 503 拉到 12–15%）。
+API_ERROR_KEYS = ("429", "503", "504", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "DEADLINE_EXCEEDED", "ServerError",
+                  "Timeout", "timed out", "逾時", "ConnectError", "ConnectionError")
+
+
+def is_api_error(error: Optional[str]) -> bool:
+    """error 是不是 LLM API 本身失敗（不是模型輸出不合法）。"""
+    return bool(error) and any(k in error for k in API_ERROR_KEYS)
+
+
 RESULTS = ("succeeded", "failed", "rejected", "overridden", "cancelled")
 RESULT_ZH = {"succeeded": "通過", "failed": "未達成", "rejected": "被拒絕", "overridden": "A 安全層接手", "cancelled": "已取消",
              None: "進行中"}
@@ -119,6 +130,7 @@ class ActionRecord:
     result: Optional[str] = None
     why: Optional[str] = None
     superseded: bool = False  # cancelled 的原因是被新的動作 / 計畫取代（Agent 改派）
+    api_error: bool = False  # cancelled 的原因是 LLM API 失敗（沒有產生動作）
     _errs: List[float] = field(default_factory=list, repr=False)
     _first_reject_s: Optional[float] = field(default=None, repr=False)
     _last_goal_t: Optional[float] = field(default=None, repr=False)
@@ -137,6 +149,8 @@ class ActionRecord:
             return "被 A 修改"
         if self.result == "cancelled" and self.superseded:
             return "已改派"
+        if self.result == "cancelled" and self.api_error:
+            return "LLM 無回應"
         return RESULT_ZH[self.result]
 
     def to_dict(self) -> dict:
@@ -160,11 +174,14 @@ class ActionLedger:
 
     # ---------- 1. Agent 輸出 ----------
     def on_event(self, ev, t_s: float) -> None:
-        """AgentEvent（llm_agent.commander）。不合法 → 記一筆 rejected；合法且已套用 → 開新動作或接續。"""
+        """AgentEvent（llm_agent.commander）。不合法 → 記一筆 rejected（API 失敗 → cancelled）；合法且已套用 → 開新動作或接續。"""
         if not ev.valid:
+            api = is_api_error(ev.error)
             self._add(ActionRecord(self._next_id("x"), None, None, None, None, [], ev.planner, ev.trigger, ev.operator_command,
-                                   None, ev.latency_ms, ev.model, False, ev.error, t_s, t_end_s=t_s, result="rejected",
-                                   why=f"白名單驗證失敗，未送出：{ev.error}"))
+                                   None, ev.latency_ms, ev.model, False, ev.error, t_s, t_end_s=t_s,
+                                   result="cancelled" if api else "rejected", api_error=api,
+                                   why=(f"LLM 沒有回應（API 失敗），沒有產生動作、未送出：{ev.error}" if api
+                                        else f"白名單驗證失敗，未送出：{ev.error}")))
             return
         plan = ev.plan
         if ev.plan_id is None:  # 合法，但在套用前就被操作員的新指令取代
@@ -214,10 +231,13 @@ class ActionLedger:
         """各機 Agent 的決策（llm_agent.drone_agent.DroneAgentEvent）。不合法 → rejected；動作改變 → 開新動作。"""
         ctx = self._plan_ctx.get(dev.drone_id, {})
         if not dev.valid:
+            api = is_api_error(dev.error)
             self._add(ActionRecord(self._next_id(dev.drone_id), dev.drone_id, dev.role, dev.mode, ctx.get("target_id"), [],
                                    dev.planner, dev.trigger, None, None, dev.latency_ms, dev.model, False, dev.error, t_s,
-                                   agent_id=dev.agent_id, decision_id=dev.decision_id, t_end_s=t_s, result="rejected",
-                                   why=f"角色白名單驗證失敗，未送出（沿用上一個動作）：{dev.error}"))
+                                   agent_id=dev.agent_id, decision_id=dev.decision_id, t_end_s=t_s,
+                                   result="cancelled" if api else "rejected", api_error=api,
+                                   why=(f"LLM 沒有回應（API 失敗），沿用上一個動作：{dev.error}" if api
+                                        else f"角色白名單驗證失敗，未送出（沿用上一個動作）：{dev.error}")))
             return
         cur = self.active.get(dev.drone_id)
         key = (dev.mode, dev.role, ctx.get("target_id"), dev.action)
@@ -402,6 +422,7 @@ class ActionLedger:
     def summary(self) -> dict:
         counts = {r: sum(1 for x in self.records if x.result == r) for r in RESULTS}
         counts["pending"] = sum(1 for x in self.records if x.result is None)
+        counts["api_error"] = sum(1 for x in self.records if x.api_error)  # cancelled 裡面 LLM API 失敗的筆數
         judged = counts["succeeded"] + counts["failed"] + counts["rejected"]
         reach = [x.time_to_reach_s for x in self.records if x.time_to_reach_s is not None]
         cs = sum(x.consistent_steps for x in self.records)
@@ -427,7 +448,7 @@ class ActionLedger:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
         cols = ["action_id", "t_start_s", "t_end_s", "drone_id", "agent_id", "role", "action", "mode", "target_id", "planner", "trigger",
                 "operator_command", "valid", "goals_sent", "c_adjustments", "acks", "accepted", "adjusted", "rejected",
-                "time_to_reach_s", "track_err_mean_m", "track_err_p95_m", "command_consistency", "result", "superseded", "status_zh",
+                "time_to_reach_s", "track_err_mean_m", "track_err_p95_m", "command_consistency", "result", "superseded", "api_error", "status_zh",
                 "why", "reason"]
         with open(out_dir / "actions.csv", "w", encoding="utf-8-sig", newline="") as f:
             w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
