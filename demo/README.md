@@ -207,9 +207,9 @@ road01 已完成地面標定（`config/video_ground_road01.json`，新府路與�
 | 1. 白名單驗證 | Agent 輸出是否合法；不合法 → `rejected`，不送出 | AgentEvent |
 | 2. 對應飛控指令 | 送出幾個 GoalPoint、最後的目標點、C 去衝突改了幾次 | 規劃器 |
 | 3. A 的回覆 | 接受 / 修改 / 拒絕次數與原因、A 實際呼叫的 MAVSDK 函式（`flight_command`） | GoalPointAck（規格 §10.8，只有 `--fleet sitl` 才有） |
-| 4. 實際執行 | **指令一致率**：無人機是不是朝目標點飛（夾角 < 45° 或已到達）<br>**到達**：目標點不動時水平 1.5 m、高度 1 m（同 A 的 move_to）；目標點在動時 1.5 m + 目標點速度 × 1 s，並連續 2 s | FleetPose / 替身 |
+| 4. 實際執行 | **指令一致率**：無人機是不是朝目標點飛（夾角 < 45° 或已到達）<br>**到達**：目標點不動時水平 1.5 m、高度 1 m（同 A 的 move_to）；目標點在動時 1.5 m + 目標點速度 × 1 s，並連續 2 s<br>**搜尋（繞圈）**：判「有沒有飛到搜尋圈上」（離圈 ≤ 1.5 m + 半徑擴大速度 × 1 s）；繞圈目標點本身比無人機快、追不到 | FleetPose / 替身 |
 
-結果用和 A 的 ActionResult 相同的詞彙：`succeeded`（通過；被 A 修改過的顯示「被 A 修改」）/ `failed`（未達成）/ `rejected`（被拒絕）/ `overridden`（已改派）/ `cancelled`（已取消）。
+結果用和 A 的 ActionResult 相同的詞彙：`succeeded`（通過；被 A 修改過的顯示「被 A 修改」）/ `failed`（未達成）/ `rejected`（被拒絕）/ `cancelled`（被新動作取代顯示「已改派」，操作員中斷或 Demo 結束顯示「已取消」）/ `overridden`（A 的安全層接手，C 自己不產生）。cancelled / overridden 不列入通過率。
 
 **兩層分開看**（規則式、5 seeds）：
 

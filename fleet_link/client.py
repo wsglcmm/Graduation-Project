@@ -5,7 +5,7 @@ A 的伺服器在學校的 Linux 主機，只綁 127.0.0.1:8765；從自己電�
 設計：
     - asyncio 在背景執行緒跑，對外是同步 API，Demo 引擎（同步迴圈）可以直接呼叫。
     - 收到的 FleetPose 先用規格 §10.2 的 strict 模型驗證，不合格的計數後丟掉，不會進到融合與規劃。
-    - 超過 heartbeat_s 沒送任何訊息就自動送 heartbeat。A 的安全層：完全沒訊息 3 s 全部懸停、15 s 全部返航；
+    - 超過 heartbeat_s 沒送任何訊息就自動送 heartbeat。A 的安全層：完全沒訊息 3 s 全部懸停、15 s 原地降落（不返航，A 11/23 確認）；
       單架超過 1 s 沒收到 GoalPoint 就懸停（failsafe = goal_timeout）。
     - A 的指令用編號指定無人機（0、1、2），這裡用 drone_id 呼叫，對應表從 state 訊息取得（預設 uavN → N−1）。
 """

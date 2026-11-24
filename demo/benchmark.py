@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from coord_transform.config import load_camera_config, load_error_model
-from demo.engine import DemoEngine
+from demo.engine import START_PRESETS, DemoEngine
 from demo.run import ROOT, feed_scripted, make_commander
 from demo.scenarios import SCENARIOS, Scenario
 from sim2d import EvaderConfig, RabbitConfig
@@ -79,12 +79,13 @@ def operator_metrics(events, commands) -> dict:
 
 def run_once(scn: Scenario, seed: int, planner: str, period_s: float, cam, err, out_dir: Optional[Path] = None,
              agents: str = "single", drone_planner: str = "rule", drone_speed_mps: float = 3.0,
-             drone_period_s: float = 6.0) -> dict:
-    """drone_speed_mps：策略場景（會逃的目標）的無人機速度上限，對齊 A 的 agent_server --max-speed。"""
+             drone_period_s: float = 6.0, start: str = "default") -> dict:
+    """drone_speed_mps：策略場景（會逃的目標）的無人機速度上限，對齊 A 的 agent_server --max-speed。
+    start：替身起點，default（預設，之前的實驗都用這組）或 sitl（A 的 SITL 出生點，和真實 SITL 對照用）。"""
     commander = make_commander(planner, period_s, scn.strategy, agents, drone_planner, drone_period_s)
     evader = EvaderConfig(seed=seed) if scn.target == "evader" else None
     engine = DemoEngine(cam, err, commander, rabbit=RabbitConfig(seed=seed), seed=seed, evader=evader,
-                        drone_max_speed_mps=drone_speed_mps if evader is not None else None)
+                        drone_max_speed_mps=drone_speed_mps if evader is not None else None, start=START_PRESETS[start])
     scripted = sorted(scn.commands)
     realtime = planner == "llm" or (agents == "multi" and drone_planner == "llm")  # LLM 要照真實時間跑，延遲才有意義
     try:
@@ -109,7 +110,7 @@ def run_once(scn: Scenario, seed: int, planner: str, period_s: float, cam, err, 
     label = scn.name if agents == "single" else f"{scn.name}［多 Agent］"
     m.update({"scenario": label, "scenario_base": scn.name, "seed": seed, "planner": planner, "agents": agents,
               "drone_planner": drone_planner if agents == "multi" else None,
-              "drone_speed_mps": drone_speed_mps if scn.target == "evader" else None})
+              "drone_speed_mps": drone_speed_mps if scn.target == "evader" else None, "start": start})
     if out_dir is not None:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "metrics.json").write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -169,6 +170,8 @@ def main(argv=None):
     ap.add_argument("--agents", nargs="+", choices=("single", "multi"), default=["single"],
                     help="single = 單一指揮官、multi = 協調 Agent + 各機 Agent；兩個都給就做比較")
     ap.add_argument("--drone-planner", choices=("rule", "llm"), default="rule", help="多 Agent 時各機 Agent 用規則式或 LLM")
+    ap.add_argument("--start", choices=tuple(START_PRESETS), default="default",
+                    help="替身起點：default（預設）或 sitl（A 的 SITL 出生點 (-8, -6/0/6)，和真實 SITL 對照用）")
     ap.add_argument("--drone-period", type=float, default=6.0,
                     help="各機 Agent 多久問一次 LLM（秒）；3 架同時呼叫，免費額度的每分鐘請求數有限時調大")
     ap.add_argument("--drone-speed", type=float, default=3.0,
@@ -192,7 +195,7 @@ def main(argv=None):
                 print(f"[{len(results) + 1}/{total}] {name} {agents} seed={seed} ...", flush=True)
                 results.append(run_once(SCENARIOS[name], seed, args.planner, args.period, cam, err,
                                         out / "runs" / (f"{name}_s{seed}" if agents == "single" else f"{name}_multi_s{seed}"),
-                                        agents, args.drone_planner, args.drone_speed, args.drone_period))
+                                        agents, args.drone_planner, args.drone_speed, args.drone_period, args.start))
 
     out.mkdir(parents=True, exist_ok=True)
     rows = [_flat(r) for r in results]

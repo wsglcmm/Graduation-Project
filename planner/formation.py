@@ -8,7 +8,7 @@ LLM 只說「uav2 當左翼攔截」，「左翼攔截要站在哪個座標」�
     chaser          正後方（180°）
     blocker_left    左前方（-60°）
     blocker_right   右前方（+60°）    → 三架平均分佈在 120° 間隔上，形成包圍
-    overwatch       目標正上方，高度 + overwatch_extra_alt_m
+    overwatch       目標正上方，維持自己的高度層（見 overwatch_extra_alt_m）
     searcher        以最後已知位置為中心繞圈，多架時相位錯開
     idle            原地不動
     herder / capturer / blocker   捕捉策略（mode = capture）的驅趕 / 抓拍 / 封鎖，幾何見 planner/capture.py
@@ -35,7 +35,9 @@ class FormationConfig:
     default_altitude_m: float = 30.0
     lead_s: float = 1.0  # 攔截提前量
     track_extra_radius_factor: float = 1.6  # track 模式隊形放大，先保持距離跟上
-    overwatch_extra_alt_m: float = 10.0
+    # 原本 10 m；A 11/23：A 的安全層會把高度拉回該架的高度層（上限 40 m），uav3 35 + 10 = 45 m 也超過上限，
+    # 送了也不會照做，只會讓動作日誌的高度差判未達成。所以預設 0：維持自己的高度層。
+    overwatch_extra_alt_m: float = 0.0
     search_angular_speed_rps: float = 0.25
     search_growth_mps: float = 2.0  # 搜尋圈半徑每秒擴大多少（找不到就越找越大）
     search_max_radius_m: float = 60.0
@@ -66,6 +68,9 @@ class FormationPlanner:
         self._hold_anchor: Dict[str, tuple] = {}  # 各機 Agent 選 hold 時的懸停位置
         self.last_adjustments: List[Adjustment] = []  # 最近一次去衝突改了哪些目標點（之後進動作日誌）
         self.adjustment_count = 0  # 累計被去衝突修改的目標點數
+        # 最近一次 goal_points 的搜尋圈：{"center": (n, e), "radius_m": r, "drones": {…}}，沒有在搜尋時為 None。
+        # 動作日誌用它判定搜尋動作「有沒有飛到搜尋圈上」（搜尋圈上的目標點本身會繞得比無人機快，追不到）。
+        self.last_search: Optional[dict] = None
 
     @property
     def capture_zone(self) -> Optional[CaptureZone]:
@@ -102,6 +107,7 @@ class FormationPlanner:
                     actions: Optional[Dict[str, str]] = None) -> List[dict]:
         """actions：各機 Agent 的動作（多 Agent 模式，drone_id → 動作）。None = 單一指揮官，角色內建的規則決定怎麼做。"""
         actions = actions or {}
+        self.last_search = None
         tgt = next((t for t in targets if t["target_id"] == plan.target_id), None)
         if tgt is not None and tgt["status"] != "lost":
             p = tgt["position_world_ned_m"]
@@ -168,6 +174,9 @@ class FormationPlanner:
         if plan.mode == "search" or role == "searcher" or tgt is None or tgt["status"] == "lost":
             cn, ce = self._search_center or self.cfg.initial_search_center
             rr = self._search_radius(r, t_ns)
+            if self.last_search is None:
+                self.last_search = {"center": (cn, ce), "radius_m": rr, "drones": set()}
+            self.last_search["drones"].add(d.drone_id)
             if self.cfg.search_speed_fraction > 0:
                 ang = self._search_phase + 2 * math.pi * k / count
             else:  # 原本的行為：固定角速度 × 絕對時間（預設，保持和之前的實驗結果完全一致）

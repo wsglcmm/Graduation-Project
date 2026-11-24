@@ -49,7 +49,8 @@ def test_same_role_continues_one_action_role_change_overrides():
     lg.on_event(event("p2"), 2.0)  # 角色沒變：同一筆
     assert len(lg.records) == 2 and lg.active["uav1"].plan_ids == ["p1", "p2"]
     lg.on_event(event("p3", roles=("blocker_left", "chaser")), 4.0)  # 兩架互換
-    assert [r.result for r in lg.records[:2]] == ["overridden", "overridden"]
+    assert [r.result for r in lg.records[:2]] == ["cancelled", "cancelled"]  # 同 A 的 ActionResult：被取代 = cancelled
+    assert all(r.superseded and r.status_zh == "已改派" for r in lg.records[:2])
     assert lg.active["uav1"].role == "blocker_left" and len(lg.records) == 4
 
 
@@ -58,6 +59,7 @@ def test_operator_hold_cancels_running_actions():
     lg.on_event(event("p1"), 0.0)
     lg.on_event(event("p2", mode="hold", roles=("idle", "idle"), trigger="operator", target_id=None), 3.0)
     assert [r.result for r in lg.records[:2]] == ["cancelled", "cancelled"]
+    assert not any(r.superseded for r in lg.records[:2]) and lg.records[0].status_zh == "已取消"
 
 
 def test_static_goal_reached_like_a_move_to():
@@ -193,11 +195,11 @@ def test_ledger_per_drone_actions():
     assert {r.agent_id for r in lg.records} == {"agent_uav1", "agent_uav2", "agent_uav3"}
     cap = next(r for r in lg.records if r.role == "capturer")
     assert cap.action == "ambush" and cap.plan_ids
-    # 抓拍 Agent 改成 engage：舊動作 overridden，開新動作
+    # 抓拍 Agent 改成 engage：舊動作 cancelled（被取代），開新動作
     evs = team.tick(int(0.5 * S), DRONES, [target(n=20.0)], zone=ZONE)
     for dev in team.new_drone_events:
         lg.on_drone_event(dev, 0.5)
-    assert cap.result == "overridden" and "engage" in cap.why
+    assert cap.result == "cancelled" and cap.superseded and "engage" in cap.why
     assert lg.active[cap.drone_id].action == "engage"
     # 不合法的各機決策：記 rejected，不影響目前動作
     from llm_agent.drone_agent import DroneAgentEvent
@@ -205,3 +207,92 @@ def test_ledger_per_drone_actions():
                                       None, None, error="capturer 不能用 push"), 1.0)
     assert lg.records[-1].result == "rejected" and lg.active[cap.drone_id].action == "engage"
     team.close()
+
+
+def _search_step(lg, t, ring_r, uav1_pos, goal_ne=(0.0, 40.0)):
+    """搜尋：目標點在圈上繞（這裡固定一點即可），判定只看離搜尋圈多遠。"""
+    search = {"center": (0.0, 0.0), "radius_m": ring_r, "drones": {"uav1"}}
+    d = drone("uav1", *uav1_pos)
+    lg.on_goals([goal("uav1", *goal_ne)], drones=[d], t_s=t, search=search)
+    lg.on_poses([d], t)
+
+
+def test_search_is_judged_by_reaching_the_ring_not_the_orbit_point():
+    """11/23 A 的真實 SITL：搜尋圈上的目標點移動得比無人機快，追不到 → 改判「有沒有飛到搜尋圈上」。"""
+    lg = ActionLedger()
+    lg.on_event(event("p1", mode="search", roles=("searcher", "searcher"), target_id=None), 0.0)
+    for k in range(31):  # 0–3 s：無人機一直在半徑 20 m 的圈上（離繞圈目標點 40 m 以上也沒關係）
+        _search_step(lg, k * 0.1, 20.0, (-20.0, 0.0))
+    rec = lg.records[0]
+    assert rec.result == "succeeded" and "搜尋圈" in rec.why and rec.search_ring == [0.0, 0.0, 20.0]
+
+
+def test_search_fails_when_drone_never_reaches_the_ring_and_deadline_uses_ring_distance():
+    lg = ActionLedger(VerifyConfig(max_speed_mps=5.0))
+    lg.on_event(event("p1", mode="search", roles=("searcher", "searcher"), target_id=None), 0.0)
+    _search_step(lg, 0.0, 20.0, (0.0, 0.0))  # 在圓心：離圈 20 m → 期限 max(8, 20/5×1.5+5) = 11 s
+    rec = lg.records[0]
+    assert rec.deadline_s == pytest.approx(11.0)
+    for k in range(1, 121):
+        _search_step(lg, k * 0.1, 20.0, (0.0, 0.0))
+    assert rec.result == "failed" and "搜尋圈" in rec.why
+
+
+def test_search_goal_speed_is_ring_growth_rate():
+    """搜尋圈每秒擴大 2 m：容許值 = 1.5 + 2 × 1 s。"""
+    lg = ActionLedger()
+    lg.on_event(event("p1", mode="search", roles=("searcher", "searcher"), target_id=None), 0.0)
+    for k in range(20):
+        _search_step(lg, k * 0.1, 20.0 + 0.2 * k, (0.0, 0.0))
+    assert lg.tolerance_m(lg.records[0]) == pytest.approx(3.5, abs=0.2)
+
+
+def test_goal_points_are_tagged_with_action_agent_and_role():
+    """11/23 A：GoalPoint 帶 action_id / agent_id / role，A 的紀錄才能對回各機 Agent 的動作。"""
+    lg = ActionLedger()
+    lg.on_event(event("p1"), 0.0)
+    gs = [goal("uav1", 1.0, 2.0), goal("uav2", 3.0, 4.0), goal("uav9", 0.0, 0.0)]
+    lg.tag_goals(gs)
+    assert gs[0]["action_id"] == lg.active["uav1"].action_id and gs[0]["agent_id"] == "coordinator" and gs[0]["role"] == "chaser"
+    assert gs[1]["role"] == "blocker_left"
+    assert "action_id" not in gs[2]  # 沒有進行中的動作就不加
+
+
+@pytest.mark.parametrize("err", ["ServerError: 503 UNAVAILABLE. high demand", "429 RESOURCE_EXHAUSTED", "LLM 逾時（8 s）"])
+def test_llm_api_failure_is_not_counted_as_rejected(err):
+    """A 11/24：API 錯誤（503 / 429 / 逾時）和「LLM 回了不合法的動作」分開記，前者不列入通過率。"""
+    lg = ActionLedger()
+    lg.on_event(event(valid=False, plan_id=None, error=err), 1.0)
+    (r,) = lg.records
+    assert r.result == "cancelled" and r.api_error and r.status_zh == "LLM 無回應" and "API" in r.why
+    s = lg.summary()
+    assert s["by_result"]["api_error"] == 1 and s["by_result"]["rejected"] == 0 and s["action_pass_rate"] is None
+
+
+def test_invalid_llm_output_is_still_rejected():
+    lg = ActionLedger()
+    lg.on_event(event(valid=False, plan_id=None, error="target_id 9 不存在"), 1.0)
+    assert lg.records[0].result == "rejected" and not lg.records[0].api_error
+
+
+def test_ack_is_attributed_by_action_id_when_present():
+    """A 11/24：改派那一瞬間 ack 回的是上一個動作的 GoalPoint；ack 帶 action_id 時照它歸屬，不照 plan_id。"""
+    lg = ActionLedger()
+    lg.on_event(event("p1"), 0.0)
+    old = lg.active["uav1"]
+    gs = [goal("uav1", 1.0, 2.0)]
+    lg.tag_goals(gs)
+    lg.on_event(event("p1b", roles=("blocker_left", "chaser")), 0.5)  # 改派：開新動作
+    new = lg.active["uav1"]
+    lg._by_plan[("p1", "uav1")] = new  # 模擬同一個 plan_id 底下已經是新動作
+    lg.on_acks([GoalPointAck(drone_id="uav1", plan_id="p1", accepted=True, action_id=gs[0]["action_id"])], 0.6)
+    assert old.acks == 1 and new.acks == 0
+    lg.on_acks([GoalPointAck(drone_id="uav1", plan_id="p1", accepted=True)], 0.7)  # 沒帶 action_id：照舊用 plan_id
+    assert new.acks == 1
+
+
+def test_summary_breaks_pass_rate_down_by_action():
+    lg = ActionLedger()
+    lg.on_event(event(valid=False, plan_id=None, error="target_id 9 不存在"), 1.0)  # 沒有 action → 用 mode（None）→ "—"
+    s = lg.summary()["by_action"]
+    assert s["—"] == {"succeeded": 0, "failed": 0, "rejected": 1, "pass_rate": 0.0}

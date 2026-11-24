@@ -19,18 +19,25 @@
                         只是跟在後面」誤判成失敗（實測：抓拍機已經抓拍成功，動作卻判未達成）；
                         但容許值放太寬，驗證就永遠通過、沒有意義，所以加上「連續 2 s」並把落後時間定在 1 s。
                         到達後繼續統計追蹤誤差（平均、p95），對應 A 的 follow / encircle 結算方式
+                        搜尋（繞圈）例外：搜尋圈上的目標點是「掃描用的參考點」，角速度固定、半徑還會擴大，
+                        移動得比無人機快，本來就追不到（11/23 A 的真實 SITL：通過率 50% 裡 2/3 的 failed 都是它）。
+                        所以搜尋改判「有沒有飛到搜尋圈上」：誤差 = |到圓心距離 − 半徑|，容許值同目標點在動
+                        （速度 = 半徑擴大的速度），期限也照到搜尋圈的距離算
 
 另外記錄「指令一致率」：每一步，無人機是不是正朝著目前的目標點飛（速度方向和「到目標點的方向」
 夾角 < 45°，或已經在容許值內）。兩層分開看才不會混在一起：
     指令一致率高、到達失敗   → 無人機有照指令飛，是目標點本身追不上（規劃的問題，例如目標點移動得和無人機一樣快）
     指令一致率低             → 無人機沒有照指令飛（被 A 修改、讓路、安全層介入，或飛控本身的問題）
 
-結果使用和 A 的 ActionResult 相同的詞彙（規格 §10.8），兩邊的「動作驗證通過率」才可以比較：
+結果使用和 A 的 ActionResult 相同的詞彙與意思（規格 §10.8、§10.11；11/23 依 A 的定義對齊），
+兩邊的「動作驗證通過率」才可以比較：
     succeeded   在期限內到達目標點
     failed      超過期限還沒到達
     rejected    白名單驗證失敗（C 不送出），或 A 拒絕了所有目標點
-    overridden  還沒驗證完就被新的計畫換掉（Agent 重新分派）
-    cancelled   被操作員指令中斷（hold / return_home），或計畫在套用前就被取代
+    cancelled   還沒驗證完就被新的動作 / 計畫取代（superseded = True，面板顯示「已改派」）、
+                被操作員指令中斷（hold / return_home）、計畫在套用前就被取代，或 Demo 結束時仍在進行
+    overridden  A 的安全層介入接手（C 自己不產生，保留給 A 的 ActionResult）
+cancelled / overridden 都不列入通過率：還沒有機會驗證完。
 
 期限 = max(min_deadline_s, 初始距離 / 速度上限 × deadline_factor + deadline_margin_s)。
 座標：world_ned，m；時間：Demo 引擎的時鐘（s）。
@@ -42,8 +49,19 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
+# LLM 呼叫本身失敗（Google 端 429 / 503 / 504、逾時、連線錯誤）：模型根本沒有回應，沒有「動作」可以驗證。
+# 和「LLM 回了不合法的動作」（白名單驗證失敗 = rejected）分開記，不列入通過率（A 11/24：LLM 版通過率被 503 拉到 12–15%）。
+API_ERROR_KEYS = ("429", "503", "504", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "DEADLINE_EXCEEDED", "ServerError",
+                  "Timeout", "timed out", "逾時", "ConnectError", "ConnectionError")
+
+
+def is_api_error(error: Optional[str]) -> bool:
+    """error 是不是 LLM API 本身失敗（不是模型輸出不合法）。"""
+    return bool(error) and any(k in error for k in API_ERROR_KEYS)
+
+
 RESULTS = ("succeeded", "failed", "rejected", "overridden", "cancelled")
-RESULT_ZH = {"succeeded": "通過", "failed": "未達成", "rejected": "被拒絕", "overridden": "已改派", "cancelled": "已取消",
+RESULT_ZH = {"succeeded": "通過", "failed": "未達成", "rejected": "被拒絕", "overridden": "A 安全層接手", "cancelled": "已取消",
              None: "進行中"}
 OPERATOR_STOP_MODES = ("hold", "return_home")
 
@@ -91,6 +109,7 @@ class ActionRecord:
     goals_sent: int = 0
     last_goal_ned: Optional[List[float]] = None
     goal_speed_mps: float = 0.0  # 目標點移動速度（平滑後），決定到達的容許值
+    search_ring: Optional[List[float]] = None  # 搜尋時：[圓心 n, 圓心 e, 半徑]，到達改判「飛到搜尋圈上」
     c_adjustments: int = 0
     # 3. A 的回覆
     acks: int = 0
@@ -110,9 +129,12 @@ class ActionRecord:
     judged_steps: int = 0  # 可以判斷的步數
     result: Optional[str] = None
     why: Optional[str] = None
+    superseded: bool = False  # cancelled 的原因是被新的動作 / 計畫取代（Agent 改派）
+    api_error: bool = False  # cancelled 的原因是 LLM API 失敗（沒有產生動作）
     _errs: List[float] = field(default_factory=list, repr=False)
     _first_reject_s: Optional[float] = field(default=None, repr=False)
     _last_goal_t: Optional[float] = field(default=None, repr=False)
+    _ring_t: Optional[float] = field(default=None, repr=False)
     _within_since: Optional[float] = field(default=None, repr=False)
 
     @property
@@ -125,6 +147,10 @@ class ActionRecord:
         """面板用的狀態：通過 / 被 A 修改 / 被拒絕 / 未達成 / 已改派 / 已取消 / 進行中。"""
         if self.result == "succeeded" and self.adjusted:
             return "被 A 修改"
+        if self.result == "cancelled" and self.superseded:
+            return "已改派"
+        if self.result == "cancelled" and self.api_error:
+            return "LLM 無回應"
         return RESULT_ZH[self.result]
 
     def to_dict(self) -> dict:
@@ -142,17 +168,21 @@ class ActionLedger:
         self.records: List[ActionRecord] = []
         self.active: Dict[str, ActionRecord] = {}  # drone_id → 進行中的動作
         self._by_plan: Dict[tuple, ActionRecord] = {}  # (plan_id, drone_id) → 動作（遲到的 ack 用）
+        self._by_action: Dict[str, ActionRecord] = {}  # action_id → 動作（ack 帶 action_id 時用）
         self._n = 0
         self.newly_resolved: List[ActionRecord] = []  # 最近一次 update 新產生結果的動作（面板顯示用）
         self._prev_pos: Dict[str, tuple] = {}  # drone_id → (n, e, t_s)，估速度方向用
 
     # ---------- 1. Agent 輸出 ----------
     def on_event(self, ev, t_s: float) -> None:
-        """AgentEvent（llm_agent.commander）。不合法 → 記一筆 rejected；合法且已套用 → 開新動作或接續。"""
+        """AgentEvent（llm_agent.commander）。不合法 → 記一筆 rejected（API 失敗 → cancelled）；合法且已套用 → 開新動作或接續。"""
         if not ev.valid:
+            api = is_api_error(ev.error)
             self._add(ActionRecord(self._next_id("x"), None, None, None, None, [], ev.planner, ev.trigger, ev.operator_command,
-                                   None, ev.latency_ms, ev.model, False, ev.error, t_s, t_end_s=t_s, result="rejected",
-                                   why=f"白名單驗證失敗，未送出：{ev.error}"))
+                                   None, ev.latency_ms, ev.model, False, ev.error, t_s, t_end_s=t_s,
+                                   result="cancelled" if api else "rejected", api_error=api,
+                                   why=(f"LLM 沒有回應（API 失敗），沒有產生動作、未送出：{ev.error}" if api
+                                        else f"白名單驗證失敗，未送出：{ev.error}")))
             return
         plan = ev.plan
         if ev.plan_id is None:  # 合法，但在套用前就被操作員的新指令取代
@@ -173,8 +203,8 @@ class ActionLedger:
                 self._by_plan[(ev.plan_id, did)] = cur
                 continue
             if cur is not None:
-                self._close(cur, t_s, "cancelled" if stop else "overridden",
-                            "操作員指令中斷" if stop else f"Agent 改派為 {plan['mode']} / {a['role']}")
+                self._close(cur, t_s, "cancelled", "操作員指令中斷" if stop else f"Agent 改派為 {plan['mode']} / {a['role']}",
+                            superseded=not stop)
             rec = ActionRecord(self._next_id(did), did, a["role"], plan["mode"], plan.get("target_id"), [ev.plan_id],
                                ev.planner, ev.trigger, ev.operator_command, plan["reason"], ev.latency_ms, ev.model, True,
                                None, t_s, agent_id="coordinator")
@@ -195,24 +225,27 @@ class ActionLedger:
                 cur.plan_ids.append(ev.plan_id)
                 self._by_plan[(ev.plan_id, did)] = cur
             elif cur is not None:
-                self._close(cur, t_s, "cancelled" if stop else "overridden",
-                            "操作員指令中斷" if stop else f"協調 Agent 改派為 {plan['mode']} / {a['role']}")
+                self._close(cur, t_s, "cancelled",
+                            "操作員指令中斷" if stop else f"協調 Agent 改派為 {plan['mode']} / {a['role']}", superseded=not stop)
 
     def on_drone_event(self, dev, t_s: float) -> None:
         """各機 Agent 的決策（llm_agent.drone_agent.DroneAgentEvent）。不合法 → rejected；動作改變 → 開新動作。"""
         ctx = self._plan_ctx.get(dev.drone_id, {})
         if not dev.valid:
+            api = is_api_error(dev.error)
             self._add(ActionRecord(self._next_id(dev.drone_id), dev.drone_id, dev.role, dev.mode, ctx.get("target_id"), [],
                                    dev.planner, dev.trigger, None, None, dev.latency_ms, dev.model, False, dev.error, t_s,
-                                   agent_id=dev.agent_id, decision_id=dev.decision_id, t_end_s=t_s, result="rejected",
-                                   why=f"角色白名單驗證失敗，未送出（沿用上一個動作）：{dev.error}"))
+                                   agent_id=dev.agent_id, decision_id=dev.decision_id, t_end_s=t_s,
+                                   result="cancelled" if api else "rejected", api_error=api,
+                                   why=(f"LLM 沒有回應（API 失敗），沿用上一個動作：{dev.error}" if api
+                                        else f"角色白名單驗證失敗，未送出（沿用上一個動作）：{dev.error}")))
             return
         cur = self.active.get(dev.drone_id)
         key = (dev.mode, dev.role, ctx.get("target_id"), dev.action)
         if cur is not None and (cur.mode, cur.role, cur.target_id, cur.action) == key:
             return
         if cur is not None:
-            self._close(cur, t_s, "overridden", f"{dev.agent_id} 改為 {dev.action}")
+            self._close(cur, t_s, "cancelled", f"{dev.agent_id} 改為 {dev.action}", superseded=True)
         rec = ActionRecord(self._next_id(dev.drone_id), dev.drone_id, dev.role, dev.mode, ctx.get("target_id"),
                            [ctx["plan_id"]] if ctx.get("plan_id") else [], dev.planner, dev.trigger,
                            ctx.get("operator_command"), dev.reason, dev.latency_ms, dev.model, True, None, t_s,
@@ -223,14 +256,35 @@ class ActionLedger:
             self._by_plan[(ctx["plan_id"], dev.drone_id)] = rec
 
     # ---------- 2. 對應飛控指令 ----------
-    def on_goals(self, goals: Sequence[dict], adjustments: Iterable = (), drones: Sequence = (), t_s: Optional[float] = None) -> None:
-        """這一步送出的 GoalPoint（規格 §10.6）與 C 去衝突的修改紀錄（planner.deconflict.Adjustment）。"""
+    def tag_goals(self, goals: Sequence[dict]) -> None:
+        """送出前在 GoalPoint 加上 action_id、agent_id、role（選填欄位，11/23 A 要求）。
+
+        A 的紀錄就能用 action_id 對回 C 的動作日誌：「哪一架的哪個 Agent、什麼角色的動作 → A 實際呼叫的 MAVSDK 函式」，
+        口試時有兩份獨立的紀錄可以互相印證。該架目前沒有進行中的動作（例如剛被改派、Agent 還沒決定）就不加。"""
+        for g in goals:
+            rec = self.active.get(g["drone_id"])
+            if rec is None:
+                continue
+            g["action_id"] = rec.action_id
+            if rec.agent_id is not None:
+                g["agent_id"] = rec.agent_id
+            if rec.role is not None:
+                g["role"] = rec.role
+
+    def on_goals(self, goals: Sequence[dict], adjustments: Iterable = (), drones: Sequence = (), t_s: Optional[float] = None,
+                 search: Optional[dict] = None) -> None:
+        """這一步送出的 GoalPoint（規格 §10.6）與 C 去衝突的修改紀錄（planner.deconflict.Adjustment）。
+        search：planner.FormationPlanner.last_search（搜尋圈與正在搜尋的無人機），None = 沒有在搜尋。"""
         pos = {d.drone_id: d for d in drones}
         for g in goals:
             rec = self._by_plan.get((g.get("plan_id"), g["drone_id"]))
             if rec is None or rec.t_end_s is not None:
                 continue
             p = g["position_world_ned_m"]
+            if search is not None and g["drone_id"] in search["drones"]:
+                self._on_search_goal(rec, g, search, pos.get(g["drone_id"]), t_s)
+                continue
+            rec.search_ring = None
             if rec.last_goal_ned is not None and t_s is not None and rec._last_goal_t is not None and t_s > rec._last_goal_t:
                 step = math.hypot(p["n"] - rec.last_goal_ned[0], p["e"] - rec.last_goal_ned[1])
                 if step <= self.cfg.jump_m:  # 跳動（讓路橫移、伏擊 → 迎上去）不是「目標點在動」，不算進速度
@@ -249,11 +303,43 @@ class ActionLedger:
             if rec is not None:
                 rec.c_adjustments += 1
 
+    def _on_search_goal(self, rec: ActionRecord, g: dict, search: dict, d, t_s: Optional[float]) -> None:
+        """搜尋：記下搜尋圈；目標點速度改用「半徑擴大的速度」（圓心換了就重新開始算）。"""
+        p = g["position_world_ned_m"]
+        (cn, ce), r = search["center"], search["radius_m"]
+        old = rec.search_ring
+        if old is not None and t_s is not None and rec._ring_t is not None and t_s > rec._ring_t:
+            if math.hypot(cn - old[0], ce - old[1]) <= self.cfg.jump_m:
+                v = min(abs(r - old[2]) / (t_s - rec._ring_t), self.cfg.max_speed_mps)
+                rec.goal_speed_mps = round(0.7 * rec.goal_speed_mps + 0.3 * v, 3)
+        elif old is None:
+            rec.goal_speed_mps = 0.0
+        rec.search_ring = [round(cn, 2), round(ce, 2), round(r, 2)]
+        rec._ring_t = t_s
+        rec._last_goal_t = None  # 之後換回一般目標點時，速度重新估
+        rec.goals_sent += 1
+        rec.last_goal_ned = [round(p["n"], 2), round(p["e"], 2), round(p["d"], 2)]
+        if rec.deadline_s is None and d is not None:
+            c = self.cfg
+            dist = abs(math.hypot(d.n - cn, d.e - ce) - r)
+            rec.deadline_s = rec.t_start_s + max(c.min_deadline_s, dist / c.max_speed_mps * c.deadline_factor + c.deadline_margin_s)
+
+    def horizontal_error_m(self, rec: ActionRecord, d) -> float:
+        """到達判定用的水平誤差（m）：一般是到目標點的距離；搜尋時是離搜尋圈多遠。"""
+        if rec.search_ring is not None:
+            cn, ce, r = rec.search_ring
+            return abs(math.hypot(d.n - cn, d.e - ce) - r)
+        gn, ge, _ = rec.last_goal_ned
+        return math.hypot(d.n - gn, d.e - ge)
+
     # ---------- 3. A 的回覆 ----------
     def on_acks(self, acks: Iterable, t_s: float) -> None:
         """fleet_link.GoalPointAck（含選填的 flight_command，規格 §10.8）。"""
         for a in acks:
-            rec = self._by_plan.get((a.plan_id, a.drone_id)) or self.active.get(a.drone_id)
+            # 優先用 ack 放回的 action_id：改派那一瞬間，同一個 plan_id 底下已經開了新動作，
+            # 但這則 ack 回的是上一個動作送出的 GoalPoint（A 11/24 發現 seed 1 的 uav2-0010 多算了 1 則）
+            rec = (self._by_action.get(a.action_id) if a.action_id else None) \
+                or self._by_plan.get((a.plan_id, a.drone_id)) or self.active.get(a.drone_id)
             if rec is None:
                 continue
             rec.acks += 1
@@ -280,9 +366,9 @@ class ActionLedger:
             if rec is None or rec.last_goal_ned is None:
                 continue
             gn, ge, gd = rec.last_goal_ned
-            eh, ev = math.hypot(d.n - gn, d.e - ge), abs(-d.alt_m - gd)
+            eh, ev = self.horizontal_error_m(rec, d), abs(-d.alt_m - gd)
             rec.final_err_h_m, rec.final_err_v_m = round(eh, 2), round(ev, 2)
-            self._judge_consistency(rec, d, gn, ge, eh, t_s)
+            self._judge_consistency(rec, d, gn, ge, math.hypot(d.n - gn, d.e - ge), t_s)
             if rec.reached_at_s is not None:
                 rec._errs.append(eh)
             if rec.result is not None:
@@ -296,12 +382,16 @@ class ActionLedger:
                 rec._within_since = None
             if inside and (not moving or t_s - rec._within_since >= c.hold_s - 1e-9):
                 rec.reached_at_s, rec.time_to_reach_s = t_s, round(t_s - rec.t_start_s, 2)
-                kind = f"連續 {c.hold_s:g} s 跟上移動中的目標點" if moving else "到達目標點"
+                if rec.search_ring is not None:
+                    kind = f"飛到搜尋圈上（連續 {c.hold_s:g} s）" if moving else "飛到搜尋圈上"
+                else:
+                    kind = f"連續 {c.hold_s:g} s 跟上移動中的目標點" if moving else "到達目標點"
                 self._resolve(rec, "succeeded", f"{kind} {tol:.1f} m 內（{rec.time_to_reach_s:.1f} s）")
             elif rec._first_reject_s is not None and rec.accepted == 0 and t_s - rec._first_reject_s >= c.reject_after_s:
                 self._resolve(rec, "rejected", f"A 拒絕：{rec.last_ack_reason}")
             elif rec.deadline_s is not None and t_s > rec.deadline_s:
-                self._resolve(rec, "failed", f"逾時：期限內沒有到達目標點（還差 {eh:.1f} m）")
+                where = "搜尋圈" if rec.search_ring is not None else "目標點"
+                self._resolve(rec, "failed", f"逾時：期限內沒有到達{where}（還差 {eh:.1f} m）")
 
     def _judge_consistency(self, rec: ActionRecord, d, gn: float, ge: float, eh: float, t_s: float) -> None:
         prev = self._prev_pos.get(d.drone_id)
@@ -336,6 +426,7 @@ class ActionLedger:
     def summary(self) -> dict:
         counts = {r: sum(1 for x in self.records if x.result == r) for r in RESULTS}
         counts["pending"] = sum(1 for x in self.records if x.result is None)
+        counts["api_error"] = sum(1 for x in self.records if x.api_error)  # cancelled 裡面 LLM API 失敗的筆數
         judged = counts["succeeded"] + counts["failed"] + counts["rejected"]
         reach = [x.time_to_reach_s for x in self.records if x.time_to_reach_s is not None]
         cs = sum(x.consistent_steps for x in self.records)
@@ -343,14 +434,29 @@ class ActionLedger:
         return {
             "actions": len(self.records),
             "by_result": counts,
-            # 動作驗證通過率：有被判定的動作中，通過的比例（已改派 / 已取消的不列入，因為還沒機會驗證完）
+            # 動作驗證通過率：有被判定的動作中，通過的比例（cancelled / overridden 不列入，因為還沒機會驗證完）
             "action_pass_rate": counts["succeeded"] / judged if judged else None,
+            # 依動作類型拆開（報告用：例如開場的繞圈搜尋 orbit 和點到點動作分開看）；沒有動作名稱的用 mode
+            "by_action": self._by_action_summary(),
             "adjusted_by_a": sum(1 for x in self.records if x.adjusted),
             "adjusted_by_c": sum(1 for x in self.records if x.c_adjustments),
             "time_to_reach_mean_s": sum(reach) / len(reach) if reach else None,
             # 指令一致率：所有動作合計，無人機朝目標點飛（或已到達）的時間比例
             "command_consistency": cs / js if js else None,
         }
+
+    def _by_action_summary(self) -> dict:
+        out: Dict[str, dict] = {}
+        for x in self.records:
+            if x.result not in ("succeeded", "failed", "rejected"):
+                continue
+            k = x.action or x.mode or "—"
+            c = out.setdefault(k, {"succeeded": 0, "failed": 0, "rejected": 0})
+            c[x.result] += 1
+        for c in out.values():
+            n = c["succeeded"] + c["failed"] + c["rejected"]
+            c["pass_rate"] = c["succeeded"] / n if n else None
+        return dict(sorted(out.items()))
 
     def write(self, out_dir: Path) -> None:
         """actions.jsonl（完整）與 actions.csv（報告用，Excel 可直接開）。"""
@@ -361,7 +467,7 @@ class ActionLedger:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
         cols = ["action_id", "t_start_s", "t_end_s", "drone_id", "agent_id", "role", "action", "mode", "target_id", "planner", "trigger",
                 "operator_command", "valid", "goals_sent", "c_adjustments", "acks", "accepted", "adjusted", "rejected",
-                "time_to_reach_s", "track_err_mean_m", "track_err_p95_m", "command_consistency", "result", "status_zh",
+                "time_to_reach_s", "track_err_mean_m", "track_err_p95_m", "command_consistency", "result", "superseded", "api_error", "status_zh",
                 "why", "reason"]
         with open(out_dir / "actions.csv", "w", encoding="utf-8-sig", newline="") as f:
             w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
@@ -375,18 +481,19 @@ class ActionLedger:
 
     def _add(self, rec: ActionRecord) -> None:
         self.records.append(rec)
+        self._by_action[rec.action_id] = rec
 
     def _resolve(self, rec: ActionRecord, result: str, why: str) -> None:
         rec.result, rec.why = result, why
         self.newly_resolved.append(rec)
 
-    def _close(self, rec: ActionRecord, t_s: float, result: str, why: str) -> None:
+    def _close(self, rec: ActionRecord, t_s: float, result: str, why: str, superseded: bool = False) -> None:
         rec.t_end_s = t_s
         if rec._errs:
             e = sorted(rec._errs)
             rec.track_err_mean_m = round(sum(e) / len(e), 2)
             rec.track_err_p95_m = round(e[min(len(e) - 1, int(0.95 * len(e)))], 2)
         if rec.result is None:
-            rec.result, rec.why = result, why
+            rec.result, rec.why, rec.superseded = result, why, superseded
         if self.active.get(rec.drone_id) is rec:
             del self.active[rec.drone_id]
