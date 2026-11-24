@@ -289,3 +289,10 @@ def test_ack_is_attributed_by_action_id_when_present():
     assert old.acks == 1 and new.acks == 0
     lg.on_acks([GoalPointAck(drone_id="uav1", plan_id="p1", accepted=True)], 0.7)  # 沒帶 action_id：照舊用 plan_id
     assert new.acks == 1
+
+
+def test_summary_breaks_pass_rate_down_by_action():
+    lg = ActionLedger()
+    lg.on_event(event(valid=False, plan_id=None, error="target_id 9 不存在"), 1.0)  # 沒有 action → 用 mode（None）→ "—"
+    s = lg.summary()["by_action"]
+    assert s["—"] == {"succeeded": 0, "failed": 0, "rejected": 1, "pass_rate": 0.0}

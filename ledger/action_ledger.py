@@ -436,12 +436,27 @@ class ActionLedger:
             "by_result": counts,
             # 動作驗證通過率：有被判定的動作中，通過的比例（cancelled / overridden 不列入，因為還沒機會驗證完）
             "action_pass_rate": counts["succeeded"] / judged if judged else None,
+            # 依動作類型拆開（報告用：例如開場的繞圈搜尋 orbit 和點到點動作分開看）；沒有動作名稱的用 mode
+            "by_action": self._by_action_summary(),
             "adjusted_by_a": sum(1 for x in self.records if x.adjusted),
             "adjusted_by_c": sum(1 for x in self.records if x.c_adjustments),
             "time_to_reach_mean_s": sum(reach) / len(reach) if reach else None,
             # 指令一致率：所有動作合計，無人機朝目標點飛（或已到達）的時間比例
             "command_consistency": cs / js if js else None,
         }
+
+    def _by_action_summary(self) -> dict:
+        out: Dict[str, dict] = {}
+        for x in self.records:
+            if x.result not in ("succeeded", "failed", "rejected"):
+                continue
+            k = x.action or x.mode or "—"
+            c = out.setdefault(k, {"succeeded": 0, "failed": 0, "rejected": 0})
+            c[x.result] += 1
+        for c in out.values():
+            n = c["succeeded"] + c["failed"] + c["rejected"]
+            c["pass_rate"] = c["succeeded"] / n if n else None
+        return dict(sorted(out.items()))
 
     def write(self, out_dir: Path) -> None:
         """actions.jsonl（完整）與 actions.csv（報告用，Excel 可直接開）。"""
