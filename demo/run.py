@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 from coord_transform.config import load_camera_config, load_error_model
-from demo.engine import DemoEngine
+from demo.engine import START_PRESETS, DemoEngine
 from llm_agent.commander import Commander
 from sim2d import EvaderConfig, RabbitConfig
 
@@ -354,6 +354,8 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=None, help="指標與事件輸出資料夾（預設 output/demo/<時間>）")
     ap.add_argument("--cmd", action="append", default=[], metavar="秒數=指令", help="預排操作員指令，可重複（例如 15=三架包圍那台車）")
+    ap.add_argument("--start", choices=tuple(START_PRESETS), default="default",
+                    help="替身起點（--fleet sim 時）：default 或 sitl（A 的 SITL 出生點，和真實 SITL 對照用）")
     ap.add_argument("--fleet", choices=("sim", "sitl"), default="sim",
                     help="sim = 內建替身；sitl = 連 A 的 3 架 SITL（agent_server，或 python -m fleet_link.fake_server）")
     ap.add_argument("--uri", default="ws://127.0.0.1:8765", help="A 的 agent_server 位址（--fleet sitl 時使用）")
@@ -399,7 +401,8 @@ def main(argv=None):
             capture_cfg = CaptureConfig(zone_direction="velocity", replan_zone_s=3.0)
             speed = args.drone_speed or 5.0
     engine = DemoEngine(cam, err, commander, rabbit=RabbitConfig(seed=args.seed), seed=args.seed, fleet=fleet,
-                        evader=evader, drone_max_speed_mps=speed, target_source=video_target, capture_cfg=capture_cfg)
+                        evader=evader, drone_max_speed_mps=speed, target_source=video_target, capture_cfg=capture_cfg,
+                        start=START_PRESETS[args.start] if fleet is None else None)
     if video_info is not None:
         video_info["speed"] = 1.0 if link is not None else args.speed
     try:

@@ -27,6 +27,10 @@ from planner import CaptureConfig, FormationConfig, FormationPlanner
 from sim2d import Evader, EvaderConfig, FleetSim, FleetSimConfig, RabbitConfig, RabbitPath
 
 DEFAULT_START = {"uav1": (-30.0, -20.0, 25.0), "uav2": (-30.0, 0.0, 30.0), "uav3": (-30.0, 20.0, 35.0)}
+# A 的 3 架 SITL 出生點（world_ned，高度為各自的高度層）。A 11/24：替身和 SITL 起點不同，
+# 看到目標的時間與角色分派都不一樣，抓拍時間的差距主要來自起點；要和 SITL 對照時用這組。
+SITL_START = {"uav1": (-8.0, -6.0, 25.0), "uav2": (-8.0, 0.0, 30.0), "uav3": (-8.0, 6.0, 35.0)}
+START_PRESETS = {"default": DEFAULT_START, "sitl": SITL_START}
 S = 1_000_000_000
 
 

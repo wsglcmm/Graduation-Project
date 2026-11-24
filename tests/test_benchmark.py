@@ -66,3 +66,14 @@ def test_switch_capture_measures_time_after_command(tmp_path):
     m = res[0]
     assert m["operator_commands_answered"] == "1/1"
     assert m["capture_after_command_s"] == m["time_to_capture_by_capturer_s"] - 35.0 > 0
+
+
+def test_benchmark_sitl_start_preset(tmp_path):
+    """A 11/24：替身改用 SITL 出生點 (-8, -6/0/6) 才能和真實 SITL 同 seed 對照；預設起點不變。"""
+    from demo import benchmark
+    from demo.engine import DEFAULT_START, SITL_START
+
+    assert DEFAULT_START["uav1"] == (-30.0, -20.0, 25.0) and SITL_START["uav3"] == (-8.0, 6.0, 35.0)
+    res = benchmark.main(["--scenario", "evader_capture", "--seeds", "0", "--agents", "multi", "--drone-speed", "5",
+                          "--start", "sitl", "--out", str(tmp_path)])
+    assert res[0]["start"] == "sitl"
