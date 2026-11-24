@@ -1,6 +1,6 @@
 # 模組介面規格（Interface Specification）
 
-- 版本：`0.2.5`（§10.5 新增捕捉策略 `capture` 模式與 `herder` / `capturer` / `blocker` 角色；新增 §10.9 各機 Agent 動作、§10.10 抓拍判定、§10.11 動作日誌；§10.3 影片場景的 track_id 與地面標定。以上都是 C 內部格式，A、B 的訊息沒有變動。v0.2.4：§10.8 新增 A → C 執行狀態：flight_command、ActionResult、Yield；§10.2 / §10.6 時間戳的時鐘；§10.6 速度上限改為啟動參數、地面站失聯行為；§10.6 機間安全距離改寫：3D ≥ 5 m、目標點推開 6 m；§2.4 參考點改為中心 + 半高平面；§10 多機與影片 Demo 介面：A 已於 2026-11-01 合併 PR #3，同意 §10.1 local ↔ world 由 A 轉換、§10.6 目標點逾時與安全距離；§10.3 影片 Detection 待 B 確認）
+- 版本：`0.2.6`（依 A 11/19、11/23 回覆與 C 的 PR #11：§10.6 GoalPoint 新增選填欄位 `action_id` / `agent_id` / `role`、機間 3D 距離驗收 ≥ 4.8 m、C ↔ agent_server 斷線改為原地降落、GoalPointAck 補欄位；§10.8 連續動作的判定、ActionAck 的 `flight_commands`；§10.9 overwatch 不再加高；§10.11 `cancelled` / `overridden` 用語對齊 A、新增 `superseded` / `api_error`、搜尋改判「飛到搜尋圈上」、`by_action`、ack 依 `action_id` 歸屬。A、B 既有訊息沒有破壞性變動。v0.2.5：§10.5 新增捕捉策略 `capture` 模式與 `herder` / `capturer` / `blocker` 角色；新增 §10.9 各機 Agent 動作、§10.10 抓拍判定、§10.11 動作日誌；§10.3 影片場景的 track_id 與地面標定。以上都是 C 內部格式，A、B 的訊息沒有變動。v0.2.4：§10.8 新增 A → C 執行狀態：flight_command、ActionResult、Yield；§10.2 / §10.6 時間戳的時鐘；§10.6 速度上限改為啟動參數、地面站失聯行為；§10.6 機間安全距離改寫：3D ≥ 5 m、目標點推開 6 m；§2.4 參考點改為中心 + 半高平面；§10 多機與影片 Demo 介面：A 已於 2026-11-01 合併 PR #3，同意 §10.1 local ↔ world 由 A 轉換、§10.6 目標點逾時與安全距離；§10.3 影片 Detection 待 B 確認）
 - §3–§7 的單機訊息 `schema_version` 仍為 `"0.1.0"`；§10 的新訊息為 `"0.2.0"`
 - 維護者：C
 - 適用範圍：B（影像辨識）→ C（座標轉換 / LLM Agent）→ A（模擬 / 飛控）
@@ -484,17 +484,30 @@ LLM 只輸出下列 JSON，C 以 pydantic strict schema 驗證，不合法就丟
 | `position_world_ned_m` | object | `n, e, d`（world_ned） |
 | `yaw_rad` | float | 選填，期望航向（例如機頭朝向目標） |
 | `max_speed_mps` | float | 選填，不得超過 A 的速度上限 |
+| `action_id` | string | 選填（2026-11-23）。C 動作日誌的動作 id（`uav1-0007`，§10.11）。A 把同一個 `action_id` 的 GoalPoint 歸成一個動作，寫進 A 的 `actions.jsonl` / `flight_cmds.jsonl` 與 ActionResult，GoalPointAck 原樣放回；兩份紀錄可以用它逐筆對照。該架剛被改派、Agent 還沒決定時不帶，A 會另開一段 `goal_stream`，不算進上一個動作 |
+| `agent_id` | string | 選填（2026-11-23）。哪個 Agent 的動作（`agent_uav1`…），A 原樣寫進紀錄與 ActionResult |
+| `role` | string | 選填（2026-11-23）。該 Agent 目前的角色（`herder` / `capturer` / `blocker`…），A 原樣寫進紀錄與 ActionResult |
+
+- `agent_id` / `role` 只在**沒有綁定的連線**（不送 hello，C 的 Demo 用一條連線送三架）採用；送過 hello 的連線一律以 hello 的資料為準，GoalPoint 不能冒充別的 Agent。
 
 A 的責任（安全層最終生效）：
 - 追蹤目標點；**超過 1.0 秒沒收到新的目標點就懸停**。
 - **機間安全距離（安全要求）**：任何時刻，任兩架的 3D 距離 ≥ 5 m。
-  - 高度分層 uav1 / uav2 / uav3 = 25 / 30 / 35 m（GoalPoint 的 `d` 一律改成該架的高度層）。不同層之間相差 5 m，所以飛行途中水平交錯時（水平距離可能只剩約 1 m），3D 距離仍滿足要求。
+  - 高度分層 uav1 / uav2 / uav3 = 25 / 30 / 35 m（GoalPoint 的 `d` 一律改成該架的高度層）。不同層之間相差 5 m（設計值），飛行途中水平交錯時 3D 距離就是高度差；A 同層對向時的升降讓路也是錯開 5 m。
+  - **驗收以實測 3D ≥ 4.8 m 為合格**（2026-11-19）：PX4 的高度控制每架約有 ±0.1 m 誤差，上下錯開的瞬間 A 實測最近 4.94–4.99 m（3 m/s、5 m/s 都一樣，和速度無關）。設計值仍是 5 m，不另外加大間距。
   - **目標點推開距離 6 m**（A 的安全層，2026-11-10 由 5 m 調整）：兩架目標點的水平距離 < 6 m 時，A 會把目標點推開到 6 m，比安全要求多留 1 m 餘裕（推開到 5 m 時實測飛到的距離只有 4.94 m）。
   - 修改目標點時，GoalPointAck 的 `adjusted = true`，`reason` 寫明改了什麼。
 - 其他安全處理（A 實作，2026-11-02）：飛行範圍 world_ned 北、東各 ±80 m（超出會夾到邊界）。
 - **速度上限是 A 的啟動參數**（2026-11-18）：`agent_server.py --max-speed 5 --default-speed 5`；預設仍是上限 3 m/s、省略 `max_speed_mps` 時 2.5 m/s。上限超過約 6 m/s 時（煞車距離大於 6 m 推開距離）啟動會印警告；8 m/s 以上要先加大推開距離與機間距離再使用。A 實測 5 m/s 同層對向交換約 16 s、邊界測試 36 項通過。C 的 `demo.run --fleet sitl --max-speed` 要設成和 A 相同。
-- **地面站（agent_server）失聯**（2026-11-18 改）：PX4 偵測到 Offboard 指令中斷後**原地懸停，30 s 沒恢復才原地降落**。原本是 PX4 自動直線返航，11/10 同層測試時兩架返航路線交叉、最近 0.59 m（見 §10.8 備註）。
-- **GoalPointAck**（A 對每一則 GoalPoint 的回覆）：`drone_id`、`plan_id`、`timestamp_ns`（原樣放回）、`accepted`、`adjusted`、`reason`、`applied_position_world_ned_m`，以及選填的 `flight_command`（實際呼叫的 MAVSDK 函式，格式見 §10.8）。
+- 失聯分兩種，**兩種都是原地懸停 → 原地降落，不返航**（避免返航路線交叉，見 §10.8 備註）：
+  - **agent_server / mavsdk_server 本身掛掉**（2026-11-18 改）：PX4 偵測到 Offboard 指令中斷後**原地懸停，30 s 沒恢復才原地降落**。原本是 PX4 自動直線返航，11/10 同層測試時兩架返航路線交叉、最近 0.59 m。
+  - **C ↔ agent_server 的連線**（2026-11-19 改，原本 15 s 返航）：
+    - 送過 hello 的連線：斷線 → 該架立刻懸停；3 s 沒有任何訊息 → 懸停；最後一則訊息後 15 s → 該架原地降落。其他架不受影響。
+    - 沒有綁定的連線（C 的 Demo）：所有連線都 3 s 沒有訊息 → 懸停；15 s → 原地降落。
+    - 降落前 A 會檢查正下方：6 m 內有別架（空中、地上，或別架的目標點）時，先在自己的高度層水平移到最近的空位再降；找不到空位才飛回出生點。
+    - FleetPose 外層 `failsafe_reason`：`agent_disconnect` / `agent_timeout` → `agent_timeout_land`；進行中的動作 ActionResult = `overridden`。
+    - 15 s 內重新連上（並送 hello）就解除；已經開始降落的不能取消。A 的啟動參數 `--hover-timeout`（預設 3 s）、`--land-timeout`（預設 15 s）。
+- **GoalPointAck**（A 對每一則 GoalPoint 的回覆）：`drone_id`、`plan_id`、`timestamp_ns`（原樣放回）、`accepted`、`adjusted`、`reason`、`applied_position_world_ned_m`、`latency_ms`（A 處理這則的時間）、`server_ms`（agent_server 從收到到回覆的時間）、`action_id`（GoalPoint 有帶才回），以及選填的 `flight_command`（實際呼叫的 MAVSDK 函式，格式見 §10.8）。一次送多架（`GoalPoints`）時回 `GoalPointAcks`。
 - 地理圍欄（對應影片場景範圍）。
 
 ### 10.7 AgentEvent（C 內部，Agent 指令面板的每一筆紀錄）
@@ -530,9 +543,11 @@ AgentEvent 只在 C 內部使用（面板與報告指標），A、B 不需要實
 - 第一次切進 Offboard 時多一個 `"also_called": ["offboard.start"]`。
 - 讓路升降中，目標點先記下：`{"mavsdk": null, "deferred": "yield"}`。被拒絕時 `flight_command` 為 `null`。
 - ActionAck 也有 `flight_commands`（陣列，依呼叫順序）：
-  - `takeoff`：`action.set_takeoff_altitude` → `action.arm` → `action.takeoff` → `offboard.set_position_ned`
+  - `takeoff`：`action.hold`（只有在地上又停在 Offboard 模式時才呼叫，例如斷線降落後）→ `action.set_takeoff_altitude` → `action.arm` → `action.takeoff` → `offboard.set_position_ned`（到高度後停在原地）
+  - `move_to`、`hold`：`offboard.set_position_ned`
   - `land`：`offboard.stop` → `action.land`
-  - `return_home`：`offboard.set_position_ned`（飛到出生點上方）→ `offboard.stop` → `action.land`
+  - `return_home`：`offboard.set_position_ned`（飛到出生點上方）→ `offboard.stop` → `action.land`（出生點上方 0.5 m 內且速度 < 0.5 m/s 才降）
+  - `follow`、`encircle`：空陣列；之後每則 GoalPointAck 帶 `flight_command`
 
 **(b) `ActionResult`：動作結束時的結果**
 
@@ -542,10 +557,16 @@ AgentEvent 只在 C 內部使用（面板與報告指標），A、B 不需要實
  "metrics": {"duration_s": 4.99, "time_to_reach_s": 4.99, "final_err_h_m": 0.4, "final_err_v_m": 0.01}}
 ```
 
-- `result`：`succeeded` / `failed` / `overridden` / `cancelled` / `rejected`。
-- `move_to`：水平 1.5 m 內、高度差 1 m 內算到達；超過時限還沒到判 `failed`（`why` 寫原因，例如「逾時：沒有到達目標」）。
-- `follow`、`encircle` 沒有「到達某一點」，在 ActionEnd 時結算追蹤誤差 `err_mean_m`、`err_p95_m`、`err_max_m`。
-- **C 對 GoalPoint 串流的驗證採用相同的到達標準**（水平 1.5 m、高度 1 m），兩邊的「動作驗證通過率」才可以比較。
+- `result`：
+  - `succeeded`：達成（判定見下）。
+  - `failed`：超過時限沒到，或追蹤誤差超過標準。
+  - `cancelled`：同一架開始了新的動作（被取代），或 Agent 送 ActionEnd 結束一次性動作。
+  - `overridden`：A 的安全層介入：GoalPoint 逾時、間距煞停、地理圍欄、Agent 斷線或逾時、緊急停止、低電量返航、PX4 接手。
+  - `rejected`：動作本身被拒絕。
+- `agent_id`、`role`：送過 hello 的連線用 hello 的資料；沒有綁定的連線用 GoalPoint 帶的選填欄位（§10.6）。
+- `move_to`：水平 1.5 m 內、高度差 1 m 內、速度 < 0.5 m/s 算到達；時限 = 距離 ÷ 速度 × 1.5 + 15 s，超過還沒到判 `failed`（`why` 寫原因，例如「逾時：沒有到達目標」）。
+- **連續動作**（`follow`、`encircle`、GoalPoint 串流 `goal_stream`）沒有「到達某一點」：開始 3 s 後才開始算，**平均水平誤差 ≤ 3 m 且 p95 ≤ 5 m** 判 `succeeded`；在 ActionEnd 或被新動作取代時結算，`metrics` 有 `err_mean_m`、`err_p95_m`、`err_max_m`。1.5 m / 1 m 只用在 `move_to`。
+- C 的動作日誌（§10.11）用 C 自己的到達判定，和 A 的 ActionResult 量的東西不同，兩邊的通過率**不能直接比較**；要互相印證時用 `action_id` 對照兩份紀錄（§10.6）。
 
 **(c) `Yield`：讓路事件**（日誌裡叫 `yield_start`、`yield_end`）
 
@@ -565,7 +586,11 @@ AgentEvent 只在 C 內部使用（面板與報告指標），A、B 不需要實
 **備註：11/10 的「互撞」（A 2026-11-18 說明）**：三架同在 30 m 的同層測試，故意關掉地面站；PX4 斷線 2 s 後自己以約 4.9 m/s 直線飛回出生點，uav1 與 uav3 的路線在 (2.5, 0) 附近交叉，第 6.6 s 最近 0.59 m（沒有碰撞，PX4 與 Gazebo 都沒記到碰撞，三架正常降落）。原因是「失聯 fallback 的返航路線」不經過任何防撞層，已改成上述原地懸停 → 30 s 後原地降落；同樣測試重做多次，最近約 14 m。
 
 **待確認**：
-- A 實測 5 m/s 上下錯開時 3D 最近 4.94 m，低於 §10.6「任何時刻 3D ≥ 5 m」6 cm，需要 A 決定是放寬容許誤差還是加大讓路距離。
+- ~~A 實測 5 m/s 上下錯開時 3D 最近 4.94 m~~ → 已決定：驗收以實測 ≥ 4.8 m 為合格（§10.6，2026-11-19）。
+- 讓路中飛機會暫時上下 5 m，C 的動作日誌垂直 1.0 m 的判定會不通過（A 2026-11-19 提出，目前實測還沒遇到讓路）。A 2026-11-24 確認：
+  - 讓路那架：讓路期間 GoalPointAck 的 `applied_position_world_ned_m.d` 是**讓路高度**（不是高度層），升降中 `flight_command` 為 `deferred` 時也一樣；原地等的那架是自己的高度層。
+  - 讓路結束時，`applied_position_world_ned_m.d` 和 FleetPose 外層 `yield_alt_m` 同時變回高度層 / `null`，但飛機還要約 2–4 s 才降回高度層。
+  - C 傾向：`yield_alt_m` 不是 `null` 時不判垂直。A 建議再加上「`yield_alt_m` 變回 `null` 後 3 s 內（或直到離高度層 ≤ 1 m）也不判垂直」。C 確認後修改。
 - §7 的 Action 請求格式還是初版（`follow`、`hover`、`search`…）；A 的實作已有 `move_to`、`follow`、`encircle`、`agent_id`、`role`（`tracker`、`guard`…），請 A 提供目前的 Action 請求格式後更新 §7，並和 C 的捕捉策略角色（`herder`、`capturer`、`blocker`）對齊。
 
 ### 10.9 各機 Agent 動作 DroneAction（C 內部，2026-11-18 新增）
@@ -589,7 +614,7 @@ AgentEvent 只在 C 內部使用（面板與報告指標），A、B 不需要實
 | `capturer` | `ambush` / `engage` / `hold` | `ambush`：捕捉區中心；`engage`：目標位置 + 速度 × 1 s |
 | `blocker` | `flank` / `hold` | 目標側後方 14 m，邊依目標偏離方向決定 |
 | `chaser` / `blocker_left` / `blocker_right` | `follow_slot` / `hold` | 包圍隊形位置（§10.5 `formation.radius_m`） |
-| `overwatch` | `overwatch` / `hold` | 目標正上方，該架高度層再加 10 m |
+| `overwatch` | `overwatch` / `hold` | 目標正上方，維持該架的高度層（2026-11-23 起不再加高 10 m：A 會把高度拉回高度層，上限 40 m） |
 | `searcher` | `orbit` / `hold` | 繞圈搜尋 |
 | `idle` | `hold` | 原地懸停 |
 
@@ -622,7 +647,7 @@ Agent 動作 → 白名單驗證 → 對應的 GoalPoint（含 C 的去衝突修
 
 | 欄位 | 說明 |
 |---|---|
-| `action_id` | `uav1-0007`（多 Agent）/ `plan-0003`（單一指揮官） |
+| `action_id` | `uav1-0007`（多 Agent）/ `plan-0003`（單一指揮官）；也放進 GoalPoint 的選填欄位送給 A（§10.6），A 的紀錄用同一個 id |
 | `drone_id` / `agent_id` / `role` / `mode` / `target_id` | 哪一架、哪個 Agent（`agent_uav1`…；單一指揮官為 `coordinator`）、角色、模式、目標 |
 | `action` / `reason` / `planner` / `latency_ms` / `model` | 動作、理由、`llm` / `rule`、延遲、LLM 模型 |
 | `valid` / `validation_error` | 白名單驗證結果；不合法的動作不送出 |
@@ -632,20 +657,24 @@ Agent 動作 → 白名單驗證 → 對應的 GoalPoint（含 C 的去衝突修
 | `t_start_s` / `deadline_s` / `t_end_s` / `time_to_reach_s` | 開始、期限、結束、到達所需時間（s，C 的時鐘） |
 | `track_err_mean_m` / `track_err_p95_m` | 跟隨目標點的水平誤差 |
 | `command_consistency` | 指令一致率：無人機速度方向與「指向目標點的方向」夾角 < 45°（或已到達）的時間比例 |
-| `result` / `why` | 結果（用語同 A 的 ActionResult，§10.8）與原因 |
+| `result` / `why` | 結果（用語與意思同 A 的 ActionResult，§10.8）與原因 |
+| `superseded` | `cancelled` 的原因是被新的動作或計畫取代（Agent 改派）時為 `true`，面板顯示「已改派」 |
+| `api_error` | `cancelled` 的原因是 LLM API 本身失敗（429 / 503 / 504 / 逾時 / 連線錯誤），沒有產生動作；面板顯示「LLM 無回應」 |
+| `search_ring` | 搜尋（`orbit`）時：`[圓心 n, 圓心 e, 半徑]`，到達改判「飛到搜尋圈上」 |
 
 **`result` 的判定**：
 
 | `result` | 條件 |
 |---|---|
-| `succeeded` | 目標點不動時：水平 1.5 m、垂直 1.0 m 內（同 A 的 `move_to`）；目標點在動時：水平 1.5 m + 目標點速度 × 1 s 內，連續 2 s |
-| `failed` | 期限內沒有達成。期限 = max(8 s, 距離 / 速度上限 × 1.5 + 5 s) |
-| `rejected` | A 拒絕，且之後沒有任何一則被接受 |
-| `overridden` | 還沒判定前就被新的動作或計畫取代（不列入通過率） |
-| `cancelled` | Demo 結束時仍在進行（不列入通過率） |
+| `succeeded` | 目標點不動時：水平 1.5 m、垂直 1.0 m 內（容許值同 A 的 `move_to`）；目標點在動時：水平 1.5 m + 目標點速度 × 1 s 內，連續 2 s；搜尋（`orbit`）：\|到圓心距離 − 半徑\| ≤ 1.5 m + 半徑擴大速度 × 1 s，連續 2 s（飛到搜尋圈上；繞圈的目標點本身移動得比無人機快，不拿它判） |
+| `failed` | 期限內沒有達成。期限 = max(8 s, 距離 / 速度上限 × 1.5 + 5 s)；搜尋的距離是到搜尋圈的距離 |
+| `rejected` | 白名單驗證失敗（LLM 回了不合法的動作，C 不送出），或 A 拒絕且之後沒有任何一則被接受 |
+| `cancelled` | 還沒判定前就被新的動作或計畫取代（`superseded = true`，面板「已改派」）、被操作員指令中斷（`hold` / `return_home`）、計畫在套用前就被取代、LLM API 失敗（`api_error = true`），或 Demo 結束時仍在進行（不列入通過率） |
+| `overridden` | A 的安全層介入接手（對應 A 的 ActionResult；C 自己不產生，不列入通過率） |
 
 - 面板顯示：通過（`succeeded`）/ 被 A 修改（`succeeded` 但 `adjusted > 0`）/ 被拒絕 / 未達成 / 已改派 / 已取消 / 進行中。
-- **動作驗證通過率** = `succeeded` /（`succeeded` + `failed` + `rejected`）。
+- **動作驗證通過率** = `succeeded` /（`succeeded` + `failed` + `rejected`）。這是 C 的判定，和 A 的 ActionResult（§10.8(b)）不能直接比較。metrics 另外輸出 `by_action`（依動作類型拆開的通過率，例如開場搜尋 `orbit` 和點到點動作分開看）。
+- GoalPointAck 的歸屬：ack 有帶 `action_id` 時照它歸到動作，沒有時照 `plan_id`（改派那一瞬間，同一個 `plan_id` 底下可能已經開了新動作）。
 - 輸出：`actions.jsonl`（完整）、`actions.csv`（UTF-8 BOM，Excel 可直接開）；各機 Agent 每次決策另記 `drone_events.jsonl`。
 - 動作日誌只記錄、不改寫。A、B 不需要實作。
 
@@ -664,3 +693,4 @@ Agent 動作 → 白名單驗證 → 對應的 GoalPoint（含 C 的去衝突修
 | 0.2.3 | 2026-11-11 | §10.6：機間安全距離改寫為「任何時刻 3D ≥ 5 m」，並記錄 A 的實作：目標點推開距離 6 m（11/10 由 5 m 調整）、高度分層、飛行範圍 ±80 m、速度上限 3 m/s。訊息格式沒有變動 | C |
 | 0.2.4 | 2026-11-18 | 依 A 11/18 回覆：§10.2 FleetPose 時間戳為 PX4 / 模擬時鐘（三架同源）、§10.6 GoalPoint 時間戳為 C 的時鐘（兩者不能相減）；§10.6 速度上限改為 A 的啟動參數、地面站失聯改為原地懸停 → 30 s 後原地降落、GoalPointAck 欄位；新增 §10.8 執行狀態（`flight_command`、`ActionResult`、`Yield`）與 11/10 近距離事件說明。C 依此新增解析，A 的既有訊息沒有破壞性變動 | A（C 代為整理） |
 | 0.2.5 | 2026-11-18 | 老師 11/16 建議（多 Agent、捕捉策略、動作可驗證）：§10.5 新增 `capture` 模式與 `herder` / `capturer` / `blocker` 角色、捕捉區；新增 §10.9 各機 Agent 動作白名單、§10.10 抓拍判定、§10.11 動作日誌；§10.3 補充影片場景需要 B 的 `track_id` 與地面標定檔格式。都是 C 內部格式，A、B 的訊息沒有變動 | C |
+| 0.2.6 | 2026-11-23 | 依 A 11/19、11/23 回覆與 C 的 PR #11：§10.6 GoalPoint 新增選填 `action_id` / `agent_id` / `role`（A 寫進紀錄，用來對照兩份紀錄）、機間 3D 距離驗收 ≥ 4.8 m（設計值 5 m）、C ↔ agent_server 斷線改為 3 s 懸停 → 15 s 原地降落（正下方有別架先橫移）、GoalPointAck 補 `latency_ms` / `server_ms` / `action_id`；§10.8 `result` 的意思、連續動作的判定（平均 ≤ 3 m 且 p95 ≤ 5 m，1.5 m / 1 m 只用在 `move_to`）、ActionAck 各動作的 `flight_commands`；§10.9 overwatch 維持高度層；§10.11 `cancelled`（含被取代 `superseded`、LLM API 失敗 `api_error`）/ `overridden`（A 安全層）對齊 A、搜尋改判飛到搜尋圈上、`by_action`、ack 依 `action_id` 歸屬。A、B 既有訊息沒有破壞性變動 | A |
